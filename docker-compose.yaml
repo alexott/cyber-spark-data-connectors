@@ -1,0 +1,21 @@
+version: '3.5'
+
+networks:
+   splunk:
+
+services:
+
+   splunk:
+      image: splunk/splunk:latest
+      environment:
+        SPLUNK_START_ARGS: "--accept-license"
+        SPLUNK_PASSWORD: ${SPLUNK_PASSWORD}
+        SPLUNK_HEC_TOKEN: ${SPLUNK_HEC_TOKEN}
+      ports:
+        - 8000:8000
+        - 8088:8088
+      volumes:
+        - ${PWD}/default.yml:/tmp/defaults/default.yml
+      networks:
+        - splunk
+
