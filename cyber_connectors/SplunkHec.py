@@ -4,8 +4,7 @@ from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCom
 from pyspark.sql.types import StructType, Row
 from requests import Session
 
-from cyber_connectors.common import SimpleCommitMessage
-
+from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
 
 
 class SplunkDataSource(DataSource):
@@ -44,7 +43,7 @@ class SplunkHecWriter:
     def _send_to_splunk(self, s: Session, msgs: list):
         if len(msgs) > 0:
             # TODO: add retries
-            response = s.post(self.uri, json=msgs)
+            response = s.post(self.uri, data="\n".join(msgs))
             print(response.status_code, response.text)
 
     def write(self, iterator: Iterator[Row]):
@@ -54,6 +53,8 @@ class SplunkHecWriter:
         from pyspark import TaskContext
         import requests
         import datetime
+        import json
+
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
@@ -63,18 +64,20 @@ class SplunkHecWriter:
         for row in iterator:
             cnt += 1
             rd = row.asDict()
-            d = {"sourcetype": "_json", "event": rd}
+            d = {"sourcetype": "_json"}
             if self.index:
                 d["index"] = self.index
             if self.source:
                 d["source"] = self.source
             if self.host:
                 d["host"] = self.host
-            if self.time_col:
-                d["time"] = int(rd.get(self.time_col, datetime.datetime.now()).timestamp())
+            if self.time_col and self.time_col in rd:
+                tm = rd.get(self.time_col, datetime.datetime.now())
+                d["time"] = int(tm.timestamp())
             else:
                 d["time"] = int(datetime.datetime.now().timestamp())
-            msgs.append(d)
+            d["event"] = rd
+            msgs.append(json.dumps(d, cls=DateTimeJsonEncoder))
 
             if len(msgs) >= self.batch_size:
                 self._send_to_splunk(s, msgs)
