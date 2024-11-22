@@ -1,7 +1,7 @@
-from dataclasses import dataclass
-
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage
 from pyspark.sql.types import StructType
+
+from cyber_connectors.common import SimpleCommitMessage
 
 
 class AzureMonitorStreamDataSource(DataSource):
@@ -13,17 +13,12 @@ class AzureMonitorStreamDataSource(DataSource):
     def name(cls):
         return "azure_monitor"
 
-    def schema(self):
-        return "name string, date string, zipcode string, state string"
+    # needed only for reads without schema
+    # def schema(self):
+    #     return "name string, date string, zipcode string, state string"
 
     def streamWriter(self, schema: StructType, overwrite: bool):
         return AzureMonitorStreamWriter(self.options)
-
-
-@dataclass
-class SimpleCommitMessage(WriterCommitMessage):
-    partition_id: int
-    count: int
 
 
 # https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python
@@ -60,7 +55,7 @@ class AzureMonitorStreamWriter(DataSourceStreamWriter):
             cnt += 1
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 
-    def commit(self, messages, batchId) -> None:
+    def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """
         Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
         In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
@@ -69,10 +64,11 @@ class AzureMonitorStreamWriter(DataSourceStreamWriter):
         # with open(os.path.join(self.path, f"{batchId}.json"), "a") as file:
         #     file.write(json.dumps(status) + "\n")
 
-    def abort(self, messages, batchId) -> None:
+    def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """
         Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
         In this FakeStreamWriter, a failure message is written into a text file inside abort().
         """
         # with open(os.path.join(self.path, f"{batchId}.txt"), "w") as file:
         #     file.write(f"failed in batch {batchId}")
+        pass
