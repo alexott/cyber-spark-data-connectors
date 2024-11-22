@@ -3,8 +3,11 @@ from dataclasses import dataclass
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage
 from pyspark.sql.types import StructType
 
+# TODO: Implement batch writer
+# TODO: Refactor code such way so it will use common REST writer for all connectors
 
-class SplunkStreamDataSource(DataSource):
+
+class SplunkDataSource(DataSource):
     """
 
     """

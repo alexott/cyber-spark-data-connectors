@@ -19,7 +19,10 @@ pytest-spark = "^0.6.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.7.0"
-pyspark = "4.0.0.dev2"
+pyspark = {extras = ["sql"], version = "4.0.0.dev2"}
+grpcio = ">=1.48,<1.57"
+grpcio-status = ">=1.48,<1.57"
+googleapis-common-protos = "^1.56.4"
 #delta-spark = "^3.2.1"
 chispa = "^0.10.1"
 mypy = "^1.12.1"
