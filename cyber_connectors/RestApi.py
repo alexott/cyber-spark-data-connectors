@@ -3,7 +3,7 @@ from typing import Iterator
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
 from pyspark.sql.types import StructType, Row
 
-from cyber_connectors.common import SimpleCommitMessage
+from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
 
 
 class RestApiDataSource(DataSource):
@@ -30,9 +30,11 @@ class RestApiWriter:
     def __init__(self, options):
         self.options = options
         self.uri = self.options.get("uri")
-        # self.token = self.options.get("token")
+        self.payload_format: str = self.options.get("http_format", "json").lower()
+        self.http_method: str = self.options.get("http_method", "post").lower()
         assert self.uri is not None
-        # assert self.token is not None
+        assert self.payload_format == "json"
+        assert self.http_method in ["post", "put"]
 
     def write(self, iterator: Iterator[Row]):
         """
@@ -40,17 +42,26 @@ class RestApiWriter:
         """
         from pyspark import TaskContext
         import requests
-        import time
+        import json
 
         s = requests.Session()
+        if self.payload_format == "json":
+            s.headers.update({"Content-Type": "application/json"})
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
         for row in iterator:
             cnt += 1
-            response = s.post(self.uri, json=row.asDict())
+            data = ""
+            if self.payload_format == "json":
+                data = json.dumps(row.asDict(), cls=DateTimeJsonEncoder)
+            if self.http_method == "post":
+                response = s.post(self.uri, data=data)
+            elif self.http_method == "put":
+                response = s.put(self.uri, data=data)
+            else:
+                raise ValueError(f"Unsupported http method: {self.http_method}")
             print(response.status_code, response.text)
-            time.sleep(1)
 
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 
