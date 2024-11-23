@@ -5,6 +5,9 @@ name = "cyber-spark-data-connectors"
 version = "0.0.1"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 authors = ["Alex Ott <alexott@gmail.com>"]
+packages = [
+    {include = "cyber_connectors"}
+]
 
 [tool.poetry.dependencies]
 python = ">=3.9,<=3.12"
