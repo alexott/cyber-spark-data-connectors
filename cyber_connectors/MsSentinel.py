@@ -1,28 +1,36 @@
-from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage
+from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
 from pyspark.sql.types import StructType
 
 from cyber_connectors.common import SimpleCommitMessage
 
 
-class AzureMonitorStreamDataSource(DataSource):
+class AzureMonitorDataSource(DataSource):
     """
 
     """
 
     @classmethod
     def name(cls):
-        return "azure_monitor"
-
-    # needed only for reads without schema
-    # def schema(self):
-    #     return "name string, date string, zipcode string, state string"
+        return "azure-monitor"
 
     def streamWriter(self, schema: StructType, overwrite: bool):
         return AzureMonitorStreamWriter(self.options)
 
+    def writer(self, schema: StructType, overwrite: bool):
+        return AzureMonitorBatchWriter(self.options)
+
+
+class MicrosoftSentinelDataSource(AzureMonitorDataSource):
+    """
+    Same implementation as AzureMonitorDataSource, just exposed as ms-sentinel
+    """
+    @classmethod
+    def name(cls):
+        return "ms-sentinel"
+
 
 # https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python
-class AzureMonitorStreamWriter(DataSourceStreamWriter):
+class AzureMonitorWriter(DataSourceStreamWriter):
     def __init__(self, options):
         self.options = options
         self.dce = self.options.get("dce")  # data_collection_endpoint
@@ -55,14 +63,26 @@ class AzureMonitorStreamWriter(DataSourceStreamWriter):
             cnt += 1
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 
+
+class AzureMonitorBatchWriter(AzureMonitorWriter, DataSourceWriter):
+    def __init__(self, options):
+        super().__init__(options)
+
+
+# https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python
+class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
+    def __init__(self, options):
+        super().__init__(options)
+
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """
         Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
         In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
         """
-        status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
+        # status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
         # with open(os.path.join(self.path, f"{batchId}.json"), "a") as file:
         #     file.write(json.dumps(status) + "\n")
+        pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """
