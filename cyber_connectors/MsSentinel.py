@@ -1,3 +1,4 @@
+from azure.monitor.ingestion import LogsIngestionClient
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
 from pyspark.sql.types import StructType
 
@@ -39,12 +40,17 @@ class AzureMonitorWriter(DataSourceStreamWriter):
         self.tenant_id = self.options.get("tenant_id")
         self.client_id = self.options.get("client_id")
         self.client_secret = self.options.get("client_secret")
+        self.batch_size = int(self.options.get("batch_size", "50"))
         assert self.dce is not None
         assert self.dcr_id is not None
         assert self.dcs is not None
         assert self.tenant_id is not None
         assert self.client_id is not None
         assert self.client_secret is not None
+
+    def _send_to_sentinel(self, s: LogsIngestionClient, msgs: list):
+        if len(msgs) > 0:
+            s.upload(rule_id=self.dcr_id, stream_name=self.dcs, logs=msgs)
 
     def write(self, iterator):
         """
@@ -53,14 +59,25 @@ class AzureMonitorWriter(DataSourceStreamWriter):
         from pyspark import TaskContext
         from azure.identity import ClientSecretCredential
         from azure.monitor.ingestion import LogsIngestionClient
-        from azure.core.exceptions import HttpResponseError
-        import json
+        # from azure.core.exceptions import HttpResponseError
+
+        credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+        logs_client = LogsIngestionClient(self.dce, credential)
+
+        msgs = []
 
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
         for row in iterator:
             cnt += 1
+            msgs.append(row.asDict())
+            if len(msgs) >= self.batch_size:
+                self._send_to_sentinel(logs_client, msgs)
+                msgs = []
+
+        self._send_to_sentinel(logs_client, msgs)
+
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 
 
@@ -69,7 +86,6 @@ class AzureMonitorBatchWriter(AzureMonitorWriter, DataSourceWriter):
         super().__init__(options)
 
 
-# https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python
 class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
     def __init__(self, options):
         super().__init__(options)
