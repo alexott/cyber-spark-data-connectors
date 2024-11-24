@@ -29,10 +29,10 @@ class RestApiDataSource(DataSource):
 class RestApiWriter:
     def __init__(self, options):
         self.options = options
-        self.uri = self.options.get("uri")
+        self.url = self.options.get("url")
         self.payload_format: str = self.options.get("http_format", "json").lower()
         self.http_method: str = self.options.get("http_method", "post").lower()
-        assert self.uri is not None
+        assert self.url is not None
         assert self.payload_format == "json"
         assert self.http_method in ["post", "put"]
 
@@ -56,9 +56,9 @@ class RestApiWriter:
             if self.payload_format == "json":
                 data = json.dumps(row.asDict(), cls=DateTimeJsonEncoder)
             if self.http_method == "post":
-                response = s.post(self.uri, data=data)
+                response = s.post(self.url, data=data)
             elif self.http_method == "put":
-                response = s.put(self.uri, data=data)
+                response = s.put(self.url, data=data)
             else:
                 raise ValueError(f"Unsupported http method: {self.http_method}")
             print(response.status_code, response.text)
