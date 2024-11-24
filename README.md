@@ -1,9 +1,69 @@
 # Custom data sources/sinks for Cybersecurity-related work
 
+Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).
 
-Based on [PySpark DataSource API](https://docs.databricks.com/en/pyspark/datasources.html) available with Spark 4 & DBR 15.4.
+## Splunk data source
 
+Right now only implements writing to Splunk - both batch & streaming. Registered data source name is `splunk`.
 
+By default, this data source will put all columns into the `event` object and send it to Splunk together with metadata (`index`, `source`, ...).  This behavior could be changed by providing `single_event_column` option to specify which string column should be used as the single value of `event`.
+
+Batch usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(SplunkDataSource)
+
+df = spark.range(10)
+df.write.format("splunk").mode("overwrite") \
+  .option("url", "http://localhost:8088/services/collector/event") \
+  .option("token", "...").save()
+```
+
+Streaming usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(SplunkDataSource)
+
+dir_name = "tests/samples/json/"
+bdf = spark.read.format("json").load(dir_name)  # to infer schema - not use in the prod!
+
+sdf = spark.readStream.format("json").schema(bdf.schema).load(dir_name)
+
+stream_options = {
+  "url": "http://localhost:8088/services/collector/event",
+  "token": "....",
+  "source": "zeek",
+  "index": "zeek",
+  "host": "my_host",
+  "time_column": "ts",
+  "checkpointLocation": "/tmp/splunk-checkpoint/"
+}
+stream = sdf.writeStream.format("splunk") \
+  .trigger(availableNow=True) \
+  .options(**stream_options).start()
+```
+
+Supported options:
+
+- `url` (string, required) - URL of the Splunk HTTP Event Collector (HEC) endpoint to send data to.  For example, `http://localhost:8088/services/collector/event`.
+- `token` (string, required) - HEC token to [authenticate to HEC endpoint](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector#HTTP_authentication).
+- `index` (string, optional) - name of the Splunk index to send data to.  If omitted, the default index configured for HEC endpoint is used.
+- `source` (string, optional) - the source value to assign to the event data.
+- `host` (string, optional) - the host value to assign to the event data.
+- `sourcetype` (string, optional, default: `_json`) - the sourcetype value to assign to the event data. 
+- `single_event_column` (string, optional) - specify which string column will be used as `event` payload.  Typically this is used to ingest log files content.
+- `time_column` (string, optional) - specify which column to use as event time value (the `time` value in Splunk payload).  Supported data types: `timestamp`, `float`, `int`, `long` (`float`/`int`/`long` values are treated as seconds since epoch).  If not specified, current timestamp will be used.
+- `indexed_fields` (string, optional) - comma-separated list of string columns to be [indexed in the ingestion time](http://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC).
+- `remove_indexed_fields` (boolean, optional, default: `false`) - if indexed fields should be removed from the `event` object.
+- `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to Splunk.
+
+## Simple REST API
+
+Right now only implements writing to arbitrary REST API - both batch & streaming.  Registered data source name is `rest`.
+
+Usage:
 
 ```python
 from cyber_connectors import *
@@ -11,35 +71,31 @@ from cyber_connectors import *
 spark.dataSource.register(RestApiDataSource)
 
 df = spark.range(10)
-df.write.format("rest").mode("overwrite").option("uri", "http://localhost:8001/").save()
-
-
-
-from cyber_connectors import *
-spark.dataSource.register(SplunkDataSource)
-
-df = spark.range(10)
-df.write.format("splunk").mode("overwrite").option("uri", "http://192.168.0.10:8088/services/collector").option("token", "...").save()
-
-
-# Streaming usage
-
-sdf = spark.readStream.format("rate").load()
-
-stream_options = {
-  "uri": "http://192.168.0.10:8088/services/collector",
-  "token": "....",
-  "source": "spark-stream",
-  "host": "my_host",
-  "time_column": "timestamp",
-  "checkpointLocation": "/tmp/splunk-checkpoint/"
-}
-stream = sdf.writeStream.format("splunk").options(**stream_options).start()
-
-
+df.write.format("rest").mode("overwrite").option("url", "http://localhost:8001/").save()
 ```
+
+Supported options:
+
+- `url` (string, required) - URL of the REST API endpoint to send data to.
+- `http_format` (string, optional, default: `json`) what payload format to use (right now only `json` is supported)
+- `http_method` (string, optional, default: `post`) what HTTP method to use (`post` or `put`).
 
 
 # TODOs
 
 - \[ \] add tests - need to mock REST API
+- \[x\] Splunk: add support sending a single-value as `event`, will require setting the column name?
+- \[ \] Splunk: add support for sending raw events?
+- \[x\] Splunk: add support for [indexed fields extraction](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC)
+- \[ \] Splunk: add retries
+- \[ \] Splunk: correctly handle `abort`/`commit` events
+- \[ \] REST API: add retries
+- \[ \] REST API: correctly handle `abort`/`commit` events
+- \[ \] Implement writing to Azure Monitor
+
+
+# References
+
+- Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
+
+
