@@ -5,6 +5,16 @@
 
 Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).
 
+  - [Available data sources](#available-data-sources)
+    - [Splunk data source](#splunk-data-source)
+    - [Simple REST API](#simple-rest-api)
+  - [Building](#building)
+  - [TODOs](#todos)
+  - [References](#references)
+
+
+# Available data sources
+
 > [!NOTE]
 > Most of these data sources/sinks are designed to work with relatively small amounts of data - alerts, etc.  If you need to read or write huge amounts of data, use native export/import functionality of corresponding external system.
 
