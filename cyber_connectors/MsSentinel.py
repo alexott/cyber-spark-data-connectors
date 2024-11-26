@@ -74,7 +74,8 @@ class AzureMonitorWriter:
         cnt = 0
         for row in iterator:
             cnt += 1
-            msgs.append(json.dumps(row.asDict(), cls=DateTimeJsonEncoder))
+            #  Workaround to convert datetime/date to string
+            msgs.append(json.loads(json.dumps(row.asDict(), cls=DateTimeJsonEncoder)))
             if len(msgs) >= self.batch_size:
                 self._send_to_sentinel(logs_client, msgs)
                 msgs = []
