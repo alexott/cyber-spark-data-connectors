@@ -1,8 +1,10 @@
+from typing import Optional, List
+
 from azure.monitor.ingestion import LogsIngestionClient
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
 from pyspark.sql.types import StructType
 
-from cyber_connectors.common import SimpleCommitMessage
+from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
 
 
 class AzureMonitorDataSource(DataSource):
@@ -31,7 +33,7 @@ class MicrosoftSentinelDataSource(AzureMonitorDataSource):
 
 
 # https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python
-class AzureMonitorWriter(DataSourceStreamWriter):
+class AzureMonitorWriter:
     def __init__(self, options):
         self.options = options
         self.dce = self.options.get("dce")  # data_collection_endpoint
@@ -59,6 +61,7 @@ class AzureMonitorWriter(DataSourceStreamWriter):
         from pyspark import TaskContext
         from azure.identity import ClientSecretCredential
         from azure.monitor.ingestion import LogsIngestionClient
+        import json
         # from azure.core.exceptions import HttpResponseError
 
         credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
@@ -71,7 +74,7 @@ class AzureMonitorWriter(DataSourceStreamWriter):
         cnt = 0
         for row in iterator:
             cnt += 1
-            msgs.append(row.asDict())
+            msgs.append(json.dumps(row.asDict(), cls=DateTimeJsonEncoder))
             if len(msgs) >= self.batch_size:
                 self._send_to_sentinel(logs_client, msgs)
                 msgs = []

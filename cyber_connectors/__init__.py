@@ -1,2 +1,3 @@
 from cyber_connectors.RestApi import RestApiDataSource
 from cyber_connectors.Splunk import SplunkDataSource
+from cyber_connectors.MsSentinel import MicrosoftSentinelDataSource, AzureMonitorDataSource
