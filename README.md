@@ -20,7 +20,7 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
 
 ## Splunk data source
 
-Right now only implements writing to Splunk - both batch & streaming. Registered data source name is `splunk`.
+Right now only implements writing to [Splunk](https://www.splunk.com/) - both batch & streaming. Registered data source name is `splunk`.
 
 By default, this data source will put all columns into the `event` object and send it to Splunk together with metadata (`index`, `source`, ...).  This behavior could be changed by providing `single_event_column` option to specify which string column should be used as the single value of `event`.
 
@@ -63,7 +63,7 @@ stream = sdf.writeStream.format("splunk") \
 
 Supported options:
 
-- `url` (string, required) - URL of the Splunk HTTP Event Collector (HEC) endpoint to send data to.  For example, `http://localhost:8088/services/collector/event`.
+- `url` (string, required) - URL of the Splunk HTTP Event Collector (HEC) endpoint to send data to.  For example, `http://localhost:8088/collector/services/event`.
 - `token` (string, required) - HEC token to [authenticate to HEC endpoint](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector#HTTP_authentication).
 - `index` (string, optional) - name of the Splunk index to send data to.  If omitted, the default index configured for HEC endpoint is used.
 - `source` (string, optional) - the source value to assign to the event data.
@@ -74,6 +74,71 @@ Supported options:
 - `indexed_fields` (string, optional) - comma-separated list of string columns to be [indexed in the ingestion time](http://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC).
 - `remove_indexed_fields` (boolean, optional, default: `false`) - if indexed fields should be removed from the `event` object.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to Splunk.
+
+## Microsoft Sentinel / Azure Monitor
+
+Right now only implements writing to [Microsoft Sentinel](https://learn.microsoft.com/en-us/azure/sentinel/overview/) - both batch & streaming. Registered data source name is `ms-sentinel`.  The integration uses [Logs Ingestion API of Azure Monitor](https://learn.microsoft.com/en-us/azure/sentinel/create-custom-connector#connect-with-the-log-ingestion-api), so it's also exposed as `azure-monitor`.
+
+To push data you need to create Data Collection Endpoint (DCE), Data Collection Rule (DCR), and create a custom table in Log Analytics workspace.  See [documentation](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview) for description of this process.  The structure of the data in DataFrame should match the structure of the defined custom table. 
+
+This connector uses Azure Service Principal Client ID/Secret for authentication - you need to grant correct permissions (`Monitoring Metrics Publisher`) to the service principal on the DCE and DCR.
+
+Batch usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(MicrosoftSentinelDataSource)
+
+sentinel_options = {
+    "dce": dc_endpoint,
+    "dcr_id": dc_rule_id,
+    "dcs": dc_stream_name,
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+  }
+
+df = spark.range(10)
+df.write.format("ms-sentinel") \
+  .mode("overwrite") \
+  .options(**sentinel_options) \
+  .save()
+```
+
+Streaming usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(MicrosoftSentinelDataSource)
+
+dir_name = "tests/samples/json/"
+bdf = spark.read.format("json").load(dir_name)  # to infer schema - not use in the prod!
+
+sdf = spark.readStream.format("json").schema(bdf.schema).load(dir_name)
+
+sentinel_stream_options = {
+    "dce": dc_endpoint,
+    "dcr_id": dc_rule_id,
+    "dcs": dc_stream_name,
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+    "checkpointLocation": "/tmp/splunk-checkpoint/"
+}
+stream = sdf.writeStream.format("splunk") \
+  .trigger(availableNow=True) \
+  .options(**sentinel_stream_options).start()
+```
+
+Supported options:
+
+- `dce` (string, required) - URL of the Data Collection Endpoint.
+- `dcr_id` (string, required) - ID of Data Collection Rule.
+- `dcs` (string, required) - name of custom table created in the Log Analytics Workspace.
+- `tenant_id` (string, required) - Azure Tenant ID.
+- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal.
+- `client_secret` (string, required) - Client Secret of Azure Service Principal.
+- `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
 
 ## Simple REST API
 
