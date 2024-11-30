@@ -4,12 +4,24 @@ from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCom
 from pyspark.sql.types import StructType, Row
 from requests import Session
 
-from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
+from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder, get_http_session
 
 
 class SplunkDataSource(DataSource):
-    """
+    """Data source for Splunk. Right now supports writing to Splunk HEC.
 
+    Write options:
+    - url: Splunk HEC URL
+    - token: Splunk HEC token
+    - time_column: (optional) column name to use as event time
+    - batch_size: (optional) number of events to batch before sending to Splunk. (default: 50)
+    - index: (optional) Splunk index
+    - source: (optional) Splunk source
+    - host: (optional) Splunk host
+    - sourcetype: (optional) Splunk sourcetype (default: _json)
+    - single_event_column: (optional) column name to use as the full event payload (i.e., text column)
+    - indexed_fields: (optional) comma separated list of fields to index
+    - remove_indexed_fields: (optional) remove indexed fields from event payload (default: false)
     """
 
     @classmethod
@@ -50,7 +62,6 @@ class SplunkHecWriter:
 
     def _send_to_splunk(self, s: Session, msgs: list):
         if len(msgs) > 0:
-            # TODO: add retries
             response = s.post(self.url, data="\n".join(msgs))
             print(response.status_code, response.text)
 
@@ -60,15 +71,15 @@ class SplunkHecWriter:
         Library imports must be within the method.
         """
         from pyspark import TaskContext
-        import requests
         import datetime
         import json
 
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
-        s = requests.Session()
-        s.headers.update({"Authorization": f"Splunk {self.token}"})
+        s = get_http_session(additional_headers={"Authorization": f"Splunk {self.token}"},
+                             retry_on_post=True)
+
         msgs = []
         for row in iterator:
             cnt += 1

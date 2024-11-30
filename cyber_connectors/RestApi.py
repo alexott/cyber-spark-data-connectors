@@ -3,11 +3,16 @@ from typing import Iterator
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
 from pyspark.sql.types import StructType, Row
 
-from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
+from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder, get_http_session
 
 
 class RestApiDataSource(DataSource):
-    """
+    """Data source for REST APIs. Right now supports writing to a REST API.
+
+    Write options:
+    - url: REST API URL
+    - http_format: (optional) format of the payload (default: json)
+    - http_method: (optional) HTTP method to use - post or put (default: post)
 
     """
 
@@ -41,12 +46,13 @@ class RestApiWriter:
         Writes the data, then returns the commit message of that partition. Library imports must be within the method.
         """
         from pyspark import TaskContext
-        import requests
         import json
 
-        s = requests.Session()
+        additional_headers = {}
         if self.payload_format == "json":
-            s.headers.update({"Content-Type": "application/json"})
+            additional_headers.update({"Content-Type": "application/json"})
+        # make retry_on_post configurable
+        s = get_http_session(additional_headers=additional_headers, retry_on_post=True)
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
