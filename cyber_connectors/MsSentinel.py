@@ -8,8 +8,15 @@ from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
 
 
 class AzureMonitorDataSource(DataSource):
-    """
+    """Data source for Azure Monitor. Right now supports writing to Azure Monitor via REST API.
 
+    Write options:
+    - dce: data collection endpoint URL
+    - dcr_id: data collection rule ID
+    - dcs: data collection stream name
+    - tenant_id: Azure tenant ID
+    - client_id: Azure service principal ID
+    - client_secret: Azure service principal client secret
     """
 
     @classmethod
@@ -24,8 +31,7 @@ class AzureMonitorDataSource(DataSource):
 
 
 class MicrosoftSentinelDataSource(AzureMonitorDataSource):
-    """
-    Same implementation as AzureMonitorDataSource, just exposed as ms-sentinel
+    """Same implementation as AzureMonitorDataSource, just exposed as ms-sentinel name.
     """
     @classmethod
     def name(cls):
@@ -52,6 +58,7 @@ class AzureMonitorWriter:
 
     def _send_to_sentinel(self, s: LogsIngestionClient, msgs: list):
         if len(msgs) > 0:
+            # TODO: add retries
             s.upload(rule_id=self.dcr_id, stream_name=self.dcs, logs=msgs)
 
     def write(self, iterator):

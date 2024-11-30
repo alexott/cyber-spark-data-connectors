@@ -182,11 +182,15 @@ Initial setup & build:
 - \[x\] Splunk: add support sending a single-value as `event`, will require setting the column name?
 - \[ \] Splunk: add support for sending raw events?
 - \[x\] Splunk: add support for [indexed fields extraction](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC)
-- \[ \] Splunk: add retries
+- \[x\] Splunk: add retries
+- \[ \] Implement reading from Splunk
 - \[ \] Splunk: correctly handle `abort`/`commit` events
-- \[ \] REST API: add retries
+- \[x\] REST API: add retries
 - \[ \] REST API: correctly handle `abort`/`commit` events
-- \[ \] Implement writing to Azure Monitor
+- \[x\] Implement writing to Azure Monitor
+- \[ \] Azure Monitor: add retries
+- \[ \] Implement reading from Azure Monitor
+- \[ \] Azure Monitor: correctly handle `abort`/`commit` events
 - \[ \] Think how to generate dependencies for use with OSS Spark
 
 
