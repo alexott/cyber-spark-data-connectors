@@ -176,24 +176,6 @@ Initial setup & build:
 > Right now, some dependencies aren't included into manifest, so if you will try it with OSS Spark, you will need to make sure that you have following dependencies set: `pyspark[sql]` (version `4.0.0.dev2` or higher), `grpcio` (`>=1.48,<1.57`), `grpcio-status` (`>=1.48,<1.57`), `googleapis-common-protos` (`1.56.4`).
 
 
-# TODOs
-
-- \[ \] add tests - need to mock REST API
-- \[x\] Splunk: add support sending a single-value as `event`, will require setting the column name?
-- \[ \] Splunk: add support for sending raw events?
-- \[x\] Splunk: add support for [indexed fields extraction](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC)
-- \[x\] Splunk: add retries
-- \[ \] Implement reading from Splunk
-- \[ \] Splunk: correctly handle `abort`/`commit` events
-- \[x\] REST API: add retries
-- \[ \] REST API: correctly handle `abort`/`commit` events
-- \[x\] Implement writing to Azure Monitor
-- \[ \] Azure Monitor: add retries
-- \[ \] Implement reading from Azure Monitor
-- \[ \] Azure Monitor: correctly handle `abort`/`commit` events
-- \[ \] Think how to generate dependencies for use with OSS Spark
-
-
 # References
 
 - Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
