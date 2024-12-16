@@ -7,9 +7,9 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
 
   - [Available data sources](#available-data-sources)
     - [Splunk data source](#splunk-data-source)
+    - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
     - [Simple REST API](#simple-rest-api)
   - [Building](#building)
-  - [TODOs](#todos)
   - [References](#references)
 
 
