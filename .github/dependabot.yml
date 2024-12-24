@@ -2,6 +2,9 @@ version: 2
 updates:
   - package-ecosystem: "pip"
     directory: "/"
+    ignore:
+      - dependency-name: "grpcio*"
+      - dependency-name: "googleapis-common-protos"
     schedule:
       interval: "weekly"
       day: "sunday"
