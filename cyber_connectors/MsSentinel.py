@@ -1,10 +1,9 @@
-from typing import Optional, List
 
 from azure.monitor.ingestion import LogsIngestionClient
-from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
+from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourceWriter, WriterCommitMessage
 from pyspark.sql.types import StructType
 
-from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage
 
 
 class AzureMonitorDataSource(DataSource):
@@ -31,8 +30,8 @@ class AzureMonitorDataSource(DataSource):
 
 
 class MicrosoftSentinelDataSource(AzureMonitorDataSource):
-    """Same implementation as AzureMonitorDataSource, just exposed as ms-sentinel name.
-    """
+    """Same implementation as AzureMonitorDataSource, just exposed as ms-sentinel name."""
+
     @classmethod
     def name(cls):
         return "ms-sentinel"
@@ -62,13 +61,12 @@ class AzureMonitorWriter:
             s.upload(rule_id=self.dcr_id, stream_name=self.dcs, logs=msgs)
 
     def write(self, iterator):
-        """
-        Writes the data, then returns the commit message of that partition. Library imports must be within the method.
-        """
-        from pyspark import TaskContext
+        """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
+        import json
+
         from azure.identity import ClientSecretCredential
         from azure.monitor.ingestion import LogsIngestionClient
-        import json
+        from pyspark import TaskContext
         # from azure.core.exceptions import HttpResponseError
 
         credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
@@ -102,8 +100,7 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
         In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
         """
         # status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
@@ -112,8 +109,7 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
         In this FakeStreamWriter, a failure message is written into a text file inside abort().
         """
         # with open(os.path.join(self.path, f"{batchId}.txt"), "w") as file:

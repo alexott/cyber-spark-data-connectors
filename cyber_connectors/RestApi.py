@@ -1,9 +1,9 @@
-from typing import Iterator
+from typing import Iterator, Dict
 
-from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
-from pyspark.sql.types import StructType, Row
+from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourceWriter, WriterCommitMessage
+from pyspark.sql.types import Row, StructType
 
-from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder, get_http_session
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
 
 
 class RestApiDataSource(DataSource):
@@ -32,7 +32,7 @@ class RestApiDataSource(DataSource):
 
 
 class RestApiWriter:
-    def __init__(self, options):
+    def __init__(self, options: Dict[str, any]):
         self.options = options
         self.url = self.options.get("url")
         self.payload_format: str = self.options.get("http_format", "json").lower()
@@ -42,11 +42,10 @@ class RestApiWriter:
         assert self.http_method in ["post", "put"]
 
     def write(self, iterator: Iterator[Row]):
-        """
-        Writes the data, then returns the commit message of that partition. Library imports must be within the method.
-        """
-        from pyspark import TaskContext
+        """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
         import json
+
+        from pyspark import TaskContext
 
         additional_headers = {}
         if self.payload_format == "json":
@@ -82,17 +81,15 @@ class RestApiStreamWriter(RestApiWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
         In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
         """
-        status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
+        {"num_partitions": len(messages), "rows": sum(m.count for m in messages)}
         # with open(os.path.join(self.path, f"{batchId}.json"), "a") as file:
         #     file.write(json.dumps(status) + "\n")
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
         In this FakeStreamWriter, a failure message is written into a text file inside abort().
         """
         # with open(os.path.join(self.path, f"{batchId}.txt"), "w") as file:

@@ -1,10 +1,10 @@
 from typing import Iterator
 
-from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, WriterCommitMessage, DataSourceWriter
-from pyspark.sql.types import StructType, Row
+from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourceWriter, WriterCommitMessage
+from pyspark.sql.types import Row, StructType
 from requests import Session
 
-from cyber_connectors.common import SimpleCommitMessage, DateTimeJsonEncoder, get_http_session
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
 
 
 class SplunkDataSource(DataSource):
@@ -66,13 +66,13 @@ class SplunkHecWriter:
             print(response.status_code, response.text)
 
     def write(self, iterator: Iterator[Row]):
-        """
-        Writes the data, then returns the commit message of that partition.
+        """Writes the data, then returns the commit message of that partition.
         Library imports must be within the method.
         """
-        from pyspark import TaskContext
         import datetime
         import json
+
+        from pyspark import TaskContext
 
         context = TaskContext.get()
         partition_id = context.partitionId()
@@ -136,16 +136,14 @@ class SplunkHecStreamWriter(SplunkHecWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
         In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
         """
         # status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """
-        Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
+        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
         In this FakeStreamWriter, a failure message is written into a text file inside abort().
         """
         pass
