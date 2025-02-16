@@ -13,7 +13,7 @@ packages = [
 python = ">=3.9,<=3.12"
 requests = "^2.32.3"
 azure-monitor-ingestion = "^1.0.4"
-azure-identity = "^1.19.0"
+azure-identity = "^1.20.0"
 
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.4"
