@@ -21,7 +21,7 @@ pytest-cov = "^6.0.0"
 pytest-spark = "^0.6.0"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.9.7"
+ruff = "^0.9.9"
 pyspark = {extras = ["sql"], version = "4.0.0.dev2"}
 grpcio = ">=1.48,<1.57"
 grpcio-status = ">=1.48,<1.57"
