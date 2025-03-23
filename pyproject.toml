@@ -18,7 +18,7 @@ azure-identity = "^1.21.0"
 [tool.poetry.group.test.dependencies]
 pytest = "^8.3.5"
 pytest-cov = "^6.0.0"
-pytest-spark = "^0.6.0"
+pytest-spark = "^0.7.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.11.2"
