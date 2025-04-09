@@ -253,14 +253,14 @@ files = [
 
 [[package]]
 name = "chispa"
-version = "0.10.1"
+version = "0.11.0"
 description = "Pyspark test helper library"
 optional = false
 python-versions = "<4.0,>=3.8"
 groups = ["dev"]
 files = [
-    {file = "chispa-0.10.1-py3-none-any.whl", hash = "sha256:f040d6eaaa9f6165a31ff675c44cad0778bb260d833f35f023610357b5f9b5ab"},
-    {file = "chispa-0.10.1.tar.gz", hash = "sha256:7ccdbfcc187c3d630efcccc853aa7a7797d3e02a4ee16278c9aeb66fe24c88ca"},
+    {file = "chispa-0.11.0-py3-none-any.whl", hash = "sha256:74949faa0f449811b06844899bdf56bea2e81441511a2fd924250fdd37a5ae4f"},
+    {file = "chispa-0.11.0.tar.gz", hash = "sha256:3ef5075c79fd3a732986069fa27a552948b9d8a302b85319c08b954dad627c0a"},
 ]
 
 [package.dependencies]
@@ -1314,4 +1314,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<=3.12"
-content-hash = "33e9a7fb2ad31ad90c2065369eff17d1ff151c4e9cce4a248b75ef311ce3f719"
+content-hash = "bbbf9a4f2e5b3b325a1ae6d88cf5f2c446870953f5329d931f1b495ebc13d10d"
