@@ -2,7 +2,7 @@
 # https://stackoverflow.com/questions/60971502/python-poetry-how-to-install-optional-dependencies
 [tool.poetry]
 name = "cyber-spark-data-connectors"
-version = "0.0.3"
+version = "0.0.4"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 authors = ["Alex Ott <alexott@gmail.com>"]
 packages = [
@@ -10,7 +10,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
-python = ">=3.9,<=3.12"
+python = ">=3.9,<3.13"
 requests = "^2.32.3"
 azure-monitor-ingestion = "^1.0.4"
 azure-identity = "^1.21.0"
