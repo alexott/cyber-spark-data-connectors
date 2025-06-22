@@ -16,7 +16,7 @@ azure-monitor-ingestion = "^1.0.4"
 azure-identity = "^1.21.0"
 
 [tool.poetry.group.test.dependencies]
-pytest = "^8.4.0"
+pytest = "^8.4.1"
 pytest-cov = "^6.2.1"
 pytest-spark = "^0.7.0"
 
