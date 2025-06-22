@@ -152,7 +152,9 @@ from cyber_connectors import *
 spark.dataSource.register(RestApiDataSource)
 
 df = spark.range(10)
-df.write.format("rest").mode("overwrite").option("url", "http://localhost:8001/").save()
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://localhost:8001/") \ 
+  .save()
 ```
 
 Supported options:
@@ -160,6 +162,14 @@ Supported options:
 - `url` (string, required) - URL of the REST API endpoint to send data to.
 - `http_format` (string, optional, default: `json`) what payload format to use (right now only `json` is supported)
 - `http_method` (string, optional, default: `post`) what HTTP method to use (`post` or `put`).
+
+This data source could be easily used to write to Tines webhook.  Just specify [Tines webhook URL](https://www.tines.com/docs/actions/types/webhook/#secrets-in-url) as `url` option:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "https://tenant.tines.com/webhook/<path>/<secret>") \
+  .save()
+```
 
 # Building
 
