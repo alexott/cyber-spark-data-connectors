@@ -960,14 +960,14 @@ testing = ["fields", "hunter", "process-tests", "pytest-xdist", "virtualenv"]
 
 [[package]]
 name = "pytest-spark"
-version = "0.7.0"
+version = "0.8.0"
 description = "pytest plugin to run the tests with support of pyspark."
 optional = false
 python-versions = "*"
 groups = ["test"]
 files = [
-    {file = "pytest_spark-0.7.0-py3-none-any.whl", hash = "sha256:5df6542e68392d24a77f9eb94786005bee56cb68059b986d1a5bac2ceec61ab4"},
-    {file = "pytest_spark-0.7.0.tar.gz", hash = "sha256:a392634fa36ec19e14bbcfded90d9cb1067c063f1c742eb92390dae20622f33c"},
+    {file = "pytest_spark-0.8.0-py3-none-any.whl", hash = "sha256:1c7e4e1f6dfdb842f5f651605c1ac80c6cccfff458b22ce3319fcdc26ed8e940"},
+    {file = "pytest_spark-0.8.0.tar.gz", hash = "sha256:26f57d10862fa7cd34567a217e4a3b965d6c4927bd15b196dfde1c6ee5eaf5b1"},
 ]
 
 [package.dependencies]
@@ -1140,4 +1140,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.14"
-content-hash = "69d16e6501c6211d16b346da6711aa5bfb4dc621c53a37b979f6ec86183f7f40"
+content-hash = "1bb5ee87a6a1a295a4be61de795b5dfafda690fdca2c30b76aad7ef905b19559"
