@@ -30,7 +30,7 @@ googleapis-common-protos = ">=1.65.0"
 chispa = "^0.11.1"
 mypy = "^1.17.0"
 types-requests = "^2.32.4.20250611"
-pyarrow = "^20.0.0"
+pyarrow = "^21.0.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
