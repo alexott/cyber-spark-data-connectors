@@ -889,13 +889,13 @@ tests = ["coverage[toml] (==5.0.4)", "pytest (>=6.0.0,<7.0.0)"]
 
 [[package]]
 name = "pyspark"
-version = "4.0.0"
+version = "4.0.1"
 description = "Apache Spark Python API"
 optional = false
 python-versions = ">=3.9"
 groups = ["dev"]
 files = [
-    {file = "pyspark-4.0.0.tar.gz", hash = "sha256:38db1b4f6095a080d7605e578d775528990e66dc326311d93e94a71cfc24e5a5"},
+    {file = "pyspark-4.0.1.tar.gz", hash = "sha256:9d1f22d994f60369228397e3479003ffe2dd736ba79165003246ff7bd48e2c73"},
 ]
 
 [package.dependencies]
@@ -1135,4 +1135,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.14"
-content-hash = "ae67b6c45dcf16539d1af76b5012db8548f274e21b7fd302841785591836367e"
+content-hash = "555adcd144eba33084ebe5e7f6c1afd1bbc5ce05e8d813cc6bf5c83041c6bd2f"
