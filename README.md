@@ -125,7 +125,7 @@ sentinel_stream_options = {
     "client_secret": client_secret,
     "checkpointLocation": "/tmp/splunk-checkpoint/"
 }
-stream = sdf.writeStream.format("splunk") \
+stream = sdf.writeStream.format("ms-sentinel") \
   .trigger(availableNow=True) \
   .options(**sentinel_stream_options).start()
 ```
