@@ -17,10 +17,13 @@ There is a number of publicly available examples that demonstrate how to impleme
 - https://github.com/databricks-industry-solutions/python-data-sources
 - https://github.com/dmatrix/spark-misc/tree/main/src/py/data_source
 - https://github.com/huggingface/pyspark_huggingface
-- https://www.databricks.com/blog/simplify-data-ingestion-new-python-data-source-api
 - https://github.com/dmoore247/PythonDataSources
 - https://github.com/dgomez04/pyspark-hubspot
 - https://github.com/dgomez04/pyspark-faker
+- https://github.com/skyler-myers-db/activemq_pyspark_connector
+- https://github.com/jiteshsoni/ethereum-streaming-pipeline/blob/6e06cdea573780ba09a33a334f7f07539721b85e/ethereum_block_stream_chainstack.py
+- https://www.canadiandataguy.com/p/stop-waiting-for-connectors-stream
+- https://www.databricks.com/blog/simplify-data-ingestion-new-python-data-source-api
 
 More information could be found in the documentation:
 
