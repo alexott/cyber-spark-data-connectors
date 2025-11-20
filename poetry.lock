@@ -58,6 +58,23 @@ isodate = ">=0.6.0"
 typing-extensions = ">=4.0.1"
 
 [[package]]
+name = "azure-monitor-query"
+version = "2.0.0"
+description = "Microsoft Corporation Azure Monitor Query Client Library for Python"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "azure_monitor_query-2.0.0-py3-none-any.whl", hash = "sha256:8f52d581271d785e12f49cd5aaa144b8910fb843db2373855a7ef94c7fc462ea"},
+    {file = "azure_monitor_query-2.0.0.tar.gz", hash = "sha256:7b05f2fcac4fb67fc9f77a7d4c5d98a0f3099fb73b57c69ec1b080773994671b"},
+]
+
+[package.dependencies]
+azure-core = ">=1.30.0"
+isodate = ">=0.6.1"
+typing-extensions = ">=4.6.0"
+
+[[package]]
 name = "certifi"
 version = "2025.6.15"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -1172,4 +1189,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.14"
-content-hash = "12cfabff3162ae0eae47f3c38a2ab11f8b9153119ee01d92025d9bcc9be0cd7a"
+content-hash = "98d55e4862a99aff243517fd7db429136dba9ddb0ea10e66324137ac0dadfad6"

@@ -1,4 +1,4 @@
-from typing import Iterator, Dict
+from typing import Dict, Iterator
 
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourceWriter, WriterCommitMessage
 from pyspark.sql.types import Row, StructType
