@@ -258,23 +258,19 @@ class AzureMonitorDataSource(DataSource):
         """Return the schema for reading data.
 
         If the user doesn't provide a schema, this method infers it by executing
-        a sample query with limit 1.
+        a sample query with limit 1. Only if inferSchema is true.
 
         Returns:
             StructType: The schema of the data
 
         """
-        # Check if we're being called for reading (workspace_id present)
-        # vs writing (dce present)
-        if self.options.get("workspace_id"):
-            # Reading - infer schema from query
+        
+        infer_schema = self.options.get("inferSchema", "true").lower() == "true"
+        if infer_schema:
             return self._infer_read_schema()
         else:
-            # Writing - schema will be provided by Spark
-            raise PySparkNotImplementedError(
-                errorClass="NOT_IMPLEMENTED",
-                messageParameters={"feature": "schema for write operations"},
-            )
+            raise Exception("Must provide schema if inferSchema is false")
+        
 
     def _infer_read_schema(self):
         """Infer schema by executing a sample query with limit 1.

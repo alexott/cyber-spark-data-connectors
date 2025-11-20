@@ -218,6 +218,7 @@ Supported read options:
 - `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
 - `client_secret` (string, required) - Client Secret of Azure Service Principal
 - `num_partitions` (int, optional, default: 1) - Number of partitions for reading data
+- `inferSchema` (bool, optional, default: true) - if we do the schema inference by sampling result.
 
 **KQL Query Examples:**
 
