@@ -36,9 +36,8 @@ class SplunkDataSource(DataSource):
 
 
 class SplunkHecWriter:
-    """
+    """ """
 
-    """
     def __init__(self, options):
         self.options = options
         self.url = self.options.get("url")
@@ -77,8 +76,7 @@ class SplunkHecWriter:
         context = TaskContext.get()
         partition_id = context.partitionId()
         cnt = 0
-        s = get_http_session(additional_headers={"Authorization": f"Splunk {self.token}"},
-                             retry_on_post=True)
+        s = get_http_session(additional_headers={"Authorization": f"Splunk {self.token}"}, retry_on_post=True)
 
         msgs = []
         for row in iterator:

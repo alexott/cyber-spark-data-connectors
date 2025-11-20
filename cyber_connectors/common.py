@@ -19,7 +19,7 @@ class DateTimeJsonEncoder(json.JSONEncoder):
         return json.JSONEncoder.default(self, o)
 
 
-def get_http_session(retry: int=5, additional_headers: dict=None, retry_on_post: bool=False):
+def get_http_session(retry: int = 5, additional_headers: dict = None, retry_on_post: bool = False):
     import requests
     from requests.adapters import HTTPAdapter
     from urllib3.util import Retry

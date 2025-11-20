@@ -5,12 +5,16 @@
 
 Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).
 
-  - [Available data sources](#available-data-sources)
-    - [Splunk data source](#splunk-data-source)
-    - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
-    - [Simple REST API](#simple-rest-api)
-  - [Building](#building)
-  - [References](#references)
+- [Custom data sources/sinks for Cybersecurity-related work](#custom-data-sourcessinks-for-cybersecurity-related-work)
+- [Available data sources](#available-data-sources)
+  - [Splunk data source](#splunk-data-source)
+  - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
+    - [Authentication Requirements](#authentication-requirements)
+    - [Writing to Microsoft Sentinel / Azure Monitor](#writing-to-microsoft-sentinel--azure-monitor)
+    - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
+  - [Simple REST API](#simple-rest-api)
+- [Building](#building)
+- [References](#references)
 
 
 # Available data sources
@@ -77,13 +81,26 @@ Supported options:
 
 ## Microsoft Sentinel / Azure Monitor
 
-Right now only implements writing to [Microsoft Sentinel](https://learn.microsoft.com/en-us/azure/sentinel/overview/) - both batch & streaming. Registered data source name is `ms-sentinel`.  The integration uses [Logs Ingestion API of Azure Monitor](https://learn.microsoft.com/en-us/azure/sentinel/create-custom-connector#connect-with-the-log-ingestion-api), so it's also exposed as `azure-monitor`.
+This data source supports both reading from and writing to [Microsoft Sentinel](https://learn.microsoft.com/en-us/azure/sentinel/overview/) / [Azure Monitor Log Analytics](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/log-analytics-overview). Registered data source names are `ms-sentinel` and `azure-monitor`.
 
-To push data you need to create Data Collection Endpoint (DCE), Data Collection Rule (DCR), and create a custom table in Log Analytics workspace.  See [documentation](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview) for description of this process.  The structure of the data in DataFrame should match the structure of the defined custom table. 
+### Authentication Requirements
 
-This connector uses Azure Service Principal Client ID/Secret for authentication - you need to grant correct permissions (`Monitoring Metrics Publisher`) to the service principal on the DCE and DCR.
+This connector uses Azure Service Principal Client ID/Secret for authentication.
 
-Batch usage:
+The service principal needs the following permissions:
+- For reading: **Log Analytics Reader** role on the Log Analytics workspace
+- For writing: **Monitoring Metrics Publisher** role on the DCE and DCR
+
+
+### Writing to Microsoft Sentinel / Azure Monitor
+
+The integration uses [Logs Ingestion API of Azure Monitor](https://learn.microsoft.com/en-us/azure/sentinel/create-custom-connector#connect-with-the-log-ingestion-api) for writing data.
+
+To push data you need to create Data Collection Endpoint (DCE), Data Collection Rule (DCR), and create a custom table in Log Analytics workspace.  See [documentation](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/logs-ingestion-api-overview) for description of this process.  The structure of the data in DataFrame should match the structure of the defined custom table.
+
+You need to grant correct permissions (`Monitoring Metrics Publisher`) to the service principal on the DCE and DCR.
+
+Batch write usage:
 
 ```python
 from cyber_connectors import *
@@ -105,7 +122,7 @@ df.write.format("ms-sentinel") \
   .save()
 ```
 
-Streaming usage:
+Streaming write usage:
 
 ```python
 from cyber_connectors import *
@@ -130,7 +147,7 @@ stream = sdf.writeStream.format("ms-sentinel") \
   .options(**sentinel_stream_options).start()
 ```
 
-Supported options:
+Supported write options:
 
 - `dce` (string, required) - URL of the Data Collection Endpoint.
 - `dcr_id` (string, required) - ID of Data Collection Rule.
@@ -139,6 +156,81 @@ Supported options:
 - `client_id` (string, required) - Application ID (client ID) of Azure Service Principal.
 - `client_secret` (string, required) - Client Secret of Azure Service Principal.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
+
+### Reading from Microsoft Sentinel / Azure Monitor
+
+The data source supports batch reading logs from Azure Monitor / Log Analytics workspaces using KQL (Kusto Query Language) queries.  If schema isn't specified with `.schema`, it will be inferred automatically.
+
+Batch read usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(AzureMonitorDataSource)
+
+# Option 1: Using timespan (ISO 8601 duration)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | where TimeGenerated > ago(1d) | take 100",
+    "timespan": "P1D",  # ISO 8601 duration: 1 day
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+# Option 2: Using start_time and end_time (ISO 8601 timestamps)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "start_time": "2024-01-01T00:00:00Z",
+    "end_time": "2024-01-02T00:00:00Z",
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+# Option 3: Using only start_time (end_time defaults to current time)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "start_time": "2024-01-01T00:00:00Z",  # Query from start_time to now
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
+
+df.show()
+```
+
+Supported read options:
+
+- `workspace_id` (string, required) - Log Analytics workspace ID
+- `query` (string, required) - KQL query to execute
+- **Time range options (choose one approach):**
+  - `timespan` (string) - Time range in ISO 8601 duration format (e.g., "P1D" = 1 day, "PT1H" = 1 hour, "P7D" = 7 days)
+  - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
+  - `end_time` (string, optional) - End time in ISO 8601 format. Only valid when `start_time` is specified
+  - **Note**: `timespan` and `start_time/end_time` are mutually exclusive - choose one approach
+- `tenant_id` (string, required) - Azure Tenant ID
+- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
+- `client_secret` (string, required) - Client Secret of Azure Service Principal
+- `num_partitions` (int, optional, default: 1) - Number of partitions for reading data
+
+**KQL Query Examples:**
+
+```python
+# Get recent Azure Activity logs
+query = "AzureActivity | where TimeGenerated > ago(24h) | project TimeGenerated, OperationName, ResourceGroup"
+
+# Get security alerts
+query = "SecurityAlert | where TimeGenerated > ago(7d) | project TimeGenerated, AlertName, Severity"
+
+# Custom table query
+query = "MyCustomTable_CL | where TimeGenerated > ago(1h)"
+```
 
 ## Simple REST API
 
