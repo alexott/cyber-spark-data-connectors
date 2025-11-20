@@ -27,7 +27,7 @@ jobs:
       - name: Install dependencies
         run: poetry install
       - name: Run tests
-        run: poetry run pytest --junitxml=test-unit.xml --cov=cyber_connectors --cov-report=term-missing:skip-covered --cov-report xml:cov.xml -vv tests/unit | tee pytest-coverage.txt
+        run: poetry run pytest --junitxml=test-unit.xml --cov=cyber_connectors --cov-report=term-missing:skip-covered --cov-report xml:cov.xml -vv tests | tee pytest-coverage.txt
       - name: Publish Test Report
         uses: mikepenz/action-junit-report@v3
         if: always() # always run even if the previous step fails
