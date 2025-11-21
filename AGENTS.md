@@ -94,25 +94,25 @@ Follow this checklist (use existing sources as templates):
 
 ### Forbidden Patterns (DO NOT ADD THESE)
 
-❌ **Abstract base classes** or complex inheritance hierarchies
-❌ **Factory patterns** or dependency injection containers
-❌ **Decorators for cross-cutting concerns** (logging, caching, performance monitoring)
-❌ **Complex configuration classes** with nested structures
-❌ **Async/await patterns** unless absolutely necessary
-❌ **Connection pooling** or caching layers
-❌ **Generic "framework" code** or reusable utilities
-❌ **Complex error handling systems** or custom exceptions
-❌ **Performance optimization** patterns (premature optimization)
-❌ **Enterprise patterns** like singleton, observer, strategy, etc.
+- ❌ **Abstract base classes** or complex inheritance hierarchies
+- ❌ **Factory patterns** or dependency injection containers
+- ❌ **Decorators for cross-cutting concerns** (logging, caching, performance monitoring)
+- ❌ **Complex configuration classes** with nested structures
+- ❌ **Async/await patterns** unless absolutely necessary
+- ❌ **Connection pooling** or caching layers
+- ❌ **Generic "framework" code** or reusable utilities
+- ❌ **Complex error handling systems** or custom exceptions
+- ❌ **Performance optimization** patterns (premature optimization)
+- ❌ **Enterprise patterns** like singleton, observer, strategy, etc.
 
 ### Required Patterns (ALWAYS USE THESE)
-✅ **Direct function calls** - no indirection or abstraction layers
-✅ **Simple classes** with clear, single responsibilities
-✅ **Environment variables** for configuration (no complex config objects)
-✅ **Explicit imports** - import exactly what you need
-✅ **Basic error handling** with try/catch and simple return dictionaries
-✅ **Straightforward control flow** - avoid complex conditional logic
-✅ **Standard library first** - only add dependencies when absolutely necessary
+- ✅ **Direct function calls** - no indirection or abstraction layers
+- ✅ **Simple classes** with clear, single responsibilities
+- ✅ **Environment variables** for configuration (no complex config objects)
+- ✅ **Explicit imports** - import exactly what you need
+- ✅ **Basic error handling** with try/catch and simple return dictionaries
+- ✅ **Straightforward control flow** - avoid complex conditional logic
+- ✅ **Standard library first** - only add dependencies when absolutely necessary
 
 ### Implementation Rules
 
@@ -245,11 +245,11 @@ df.write.format("splunk").option("url", "...").save()
 
 ## Summary: What Makes This Project "Senior Developer Approved"
 
-✅ **Readable**: Any developer can understand the code immediately
-✅ **Maintainable**: Simple patterns that are easy to modify
-✅ **Focused**: Each module has a single, clear responsibility
-✅ **Direct**: No unnecessary abstractions or indirection
-✅ **Practical**: Solves the specific problem without over-engineering
+- **Readable**: Any developer can understand the code immediately
+- **Maintainable**: Simple patterns that are easy to modify
+- **Focused**: Each module has a single, clear responsibility
+- **Direct**: No unnecessary abstractions or indirection
+- **Practical**: Solves the specific problem without over-engineering
 
 When in doubt, choose the **simpler** solution. Your future self (and your teammates) will thank you.
 
