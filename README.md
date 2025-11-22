@@ -159,7 +159,9 @@ Supported write options:
 
 ### Reading from Microsoft Sentinel / Azure Monitor
 
-The data source supports batch reading logs from Azure Monitor / Log Analytics workspaces using KQL (Kusto Query Language) queries.  If schema isn't specified with `.schema`, it will be inferred automatically.
+The data source supports both batch and streaming reads from Azure Monitor / Log Analytics workspaces using KQL (Kusto Query Language) queries.  If schema isn't specified with `.schema`, it will be inferred automatically.
+
+#### Batch Read
 
 Batch read usage:
 
@@ -232,6 +234,60 @@ query = "SecurityAlert | where TimeGenerated > ago(7d) | project TimeGenerated, 
 # Custom table query
 query = "MyCustomTable_CL | where TimeGenerated > ago(1h)"
 ```
+
+#### Streaming Read
+
+The data source supports streaming reads from Azure Monitor / Log Analytics. The streaming reader uses time-based offsets to track progress and splits time ranges into partitions for parallel processing.
+
+Streaming read usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(AzureMonitorDataSource)
+
+# Stream from a specific timestamp
+stream_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | project TimeGenerated, OperationName, ResourceGroup",
+    "start_time": "2024-01-01T00:00:00Z",  # Start streaming from this timestamp
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+    "checkpointLocation": "/tmp/azure-monitor-checkpoint/",
+    "partition_duration": "3600",  # Optional: partition size in seconds (default 1 hour)
+}
+
+# Read stream
+stream_df = spark.readStream.format("azure-monitor") \
+    .options(**stream_options) \
+    .load()
+
+# Write to console or another sink
+query = stream_df.writeStream \
+    .format("console") \
+    .trigger(availableNow=True) \
+    .option("checkpointLocation", "/tmp/azure-monitor-checkpoint/") \
+    .start()
+
+query.awaitTermination()
+```
+
+Supported streaming read options:
+
+- `workspace_id` (string, required) - Log Analytics workspace ID
+- `query` (string, required) - KQL query to execute (should not include time filters - these are added automatically)
+- `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from current time
+- `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
+- `tenant_id` (string, required) - Azure Tenant ID
+- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
+- `client_secret` (string, required) - Client Secret of Azure Service Principal
+- `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints
+
+**Important notes for streaming:**
+- The reader automatically tracks the timestamp of the last processed data in checkpoints
+- Time ranges are split into partitions based on `partition_duration` for parallel processing
+- The query should NOT include time filters (e.g., `where TimeGenerated > ago(1d)`) - the reader adds these automatically based on offsets
+- Use `start_time: "latest"` to begin streaming from the current time (useful for monitoring real-time data)
 
 ## Simple REST API
 

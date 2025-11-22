@@ -48,6 +48,7 @@ class TestAzureMonitorDataSource:
         """Test that data source has schema() method that infers schema."""
         # Mock the Azure Monitor query client
         from unittest.mock import Mock, patch
+
         from azure.monitor.query import LogsQueryStatus
 
         with patch("azure.monitor.query.LogsQueryClient") as mock_client_cls, patch(
@@ -78,6 +79,7 @@ class TestAzureMonitorDataSource:
     def test_schema_inference(self, mock_credential, mock_client, basic_options):
         """Test that schema is inferred by DataSource from actual row data."""
         from datetime import datetime, timezone
+
         from azure.monitor.query import LogsQueryStatus
 
         # Create mock response for schema inference
@@ -230,6 +232,7 @@ class TestAzureMonitorDataSource:
     def test_schema_inference_type_mapping(self, mock_credential, mock_client, basic_options):
         """Test that schema inference correctly maps Python types to PySpark types."""
         from datetime import datetime, timezone
+
         from azure.monitor.query import LogsQueryStatus
         from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType, TimestampType
 

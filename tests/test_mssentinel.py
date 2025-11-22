@@ -1,17 +1,16 @@
 """Unit tests for Microsoft Sentinel / Azure Monitor data source."""
 
-import json
 from datetime import datetime
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import Mock, patch
 
 import pytest
-from pyspark.sql.types import Row, StructField, StructType, IntegerType, StringType, TimestampType
+from pyspark.sql.types import IntegerType, Row, StringType, StructField, StructType, TimestampType
 
 from cyber_connectors.MsSentinel import (
-    AzureMonitorDataSource,
-    MicrosoftSentinelDataSource,
     AzureMonitorBatchWriter,
-    AzureMonitorStreamWriter
+    AzureMonitorDataSource,
+    AzureMonitorStreamWriter,
+    MicrosoftSentinelDataSource,
 )
 
 
@@ -24,18 +23,20 @@ def basic_options():
         "dcs": "Custom-TestTable_CL",
         "tenant_id": "tenant-id-12345",
         "client_id": "client-id-12345",
-        "client_secret": "client-secret-12345"
+        "client_secret": "client-secret-12345",
     }
 
 
 @pytest.fixture
 def sample_schema():
     """Sample schema for testing."""
-    return StructType([
-        StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
-        StructField("timestamp", TimestampType(), True)
-    ])
+    return StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("name", StringType(), True),
+            StructField("timestamp", TimestampType(), True),
+        ]
+    )
 
 
 class TestAzureMonitorDataSource:
@@ -99,7 +100,7 @@ class TestAzureMonitorWriter:
             "dcs": "stream",
             "tenant_id": "tenant",
             "client_id": "client",
-            "client_secret": "secret"
+            "client_secret": "secret",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -111,7 +112,7 @@ class TestAzureMonitorWriter:
             "dcs": "stream",
             "tenant_id": "tenant",
             "client_id": "client",
-            "client_secret": "secret"
+            "client_secret": "secret",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -123,7 +124,7 @@ class TestAzureMonitorWriter:
             "dcr_id": "dcr-test",
             "tenant_id": "tenant",
             "client_id": "client",
-            "client_secret": "secret"
+            "client_secret": "secret",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -135,7 +136,7 @@ class TestAzureMonitorWriter:
             "dcr_id": "dcr-test",
             "dcs": "stream",
             "client_id": "client",
-            "client_secret": "secret"
+            "client_secret": "secret",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -147,7 +148,7 @@ class TestAzureMonitorWriter:
             "dcr_id": "dcr-test",
             "dcs": "stream",
             "tenant_id": "tenant",
-            "client_secret": "secret"
+            "client_secret": "secret",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -159,7 +160,7 @@ class TestAzureMonitorWriter:
             "dcr_id": "dcr-test",
             "dcs": "stream",
             "tenant_id": "tenant",
-            "client_id": "client"
+            "client_id": "client",
         }
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
@@ -173,21 +174,21 @@ class TestAzureMonitorWriter:
             "tenant_id": "tenant",
             "client_id": "client",
             "client_secret": "secret",
-            "batch_size": "100"
+            "batch_size": "100",
         }
         writer = AzureMonitorBatchWriter(options)
         assert writer.batch_size == 100
 
-    @patch('pyspark.TaskContext')
+    @patch("pyspark.TaskContext")
     def test_write_basic(self, mock_task_context, basic_options):
         """Test basic write functionality."""
         mock_context = Mock()
         mock_context.partitionId.return_value = 0
         mock_task_context.get.return_value = mock_context
 
-        with patch('azure.identity.ClientSecretCredential') as mock_credential, \
-             patch('azure.monitor.ingestion.LogsIngestionClient') as mock_logs_client_class:
-            
+        with patch("azure.identity.ClientSecretCredential") as mock_credential, patch(
+            "azure.monitor.ingestion.LogsIngestionClient"
+        ) as mock_logs_client_class:
             mock_credential_instance = Mock()
             mock_credential.return_value = mock_credential_instance
 
@@ -204,20 +205,20 @@ class TestAzureMonitorWriter:
             assert mock_logs_client.upload.called
 
             call_args = mock_logs_client.upload.call_args
-            assert call_args[1]['rule_id'] == "dcr-test123456789"
-            assert call_args[1]['stream_name'] == "Custom-TestTable_CL"
-            assert len(call_args[1]['logs']) == 1
+            assert call_args[1]["rule_id"] == "dcr-test123456789"
+            assert call_args[1]["stream_name"] == "Custom-TestTable_CL"
+            assert len(call_args[1]["logs"]) == 1
 
-    @patch('pyspark.TaskContext')
+    @patch("pyspark.TaskContext")
     def test_write_with_datetime(self, mock_task_context, basic_options):
         """Test write with datetime fields (should be converted to strings)."""
         mock_context = Mock()
         mock_context.partitionId.return_value = 0
         mock_task_context.get.return_value = mock_context
 
-        with patch('azure.identity.ClientSecretCredential') as mock_credential, \
-             patch('azure.monitor.ingestion.LogsIngestionClient') as mock_logs_client_class:
-            
+        with patch("azure.identity.ClientSecretCredential") as mock_credential, patch(
+            "azure.monitor.ingestion.LogsIngestionClient"
+        ) as mock_logs_client_class:
             mock_credential_instance = Mock()
             mock_credential.return_value = mock_credential_instance
 
@@ -232,19 +233,19 @@ class TestAzureMonitorWriter:
 
             assert commit_msg.count == 1
             call_args = mock_logs_client.upload.call_args
-            logs = call_args[1]['logs']
-            assert isinstance(logs[0]['timestamp'], str)
+            logs = call_args[1]["logs"]
+            assert isinstance(logs[0]["timestamp"], str)
 
-    @patch('pyspark.TaskContext')
+    @patch("pyspark.TaskContext")
     def test_write_batching(self, mock_task_context):
         """Test that batching works correctly."""
         mock_context = Mock()
         mock_context.partitionId.return_value = 0
         mock_task_context.get.return_value = mock_context
 
-        with patch('azure.identity.ClientSecretCredential') as mock_credential, \
-             patch('azure.monitor.ingestion.LogsIngestionClient') as mock_logs_client_class:
-            
+        with patch("azure.identity.ClientSecretCredential") as mock_credential, patch(
+            "azure.monitor.ingestion.LogsIngestionClient"
+        ) as mock_logs_client_class:
             mock_credential_instance = Mock()
             mock_credential.return_value = mock_credential_instance
 
@@ -259,7 +260,7 @@ class TestAzureMonitorWriter:
                 "tenant_id": "tenant",
                 "client_id": "client",
                 "client_secret": "secret",
-                "batch_size": "2"
+                "batch_size": "2",
             }
             writer = AzureMonitorBatchWriter(options)
             rows = [Row(id=i) for i in range(5)]
@@ -269,16 +270,16 @@ class TestAzureMonitorWriter:
             # Should be called 3 times: 2+2+1
             assert mock_logs_client.upload.call_count == 3
 
-    @patch('pyspark.TaskContext')
+    @patch("pyspark.TaskContext")
     def test_write_credential_creation(self, mock_task_context, basic_options):
         """Test that credentials are created correctly."""
         mock_context = Mock()
         mock_context.partitionId.return_value = 0
         mock_task_context.get.return_value = mock_context
 
-        with patch('azure.identity.ClientSecretCredential') as mock_credential, \
-             patch('azure.monitor.ingestion.LogsIngestionClient') as mock_logs_client_class:
-            
+        with patch("azure.identity.ClientSecretCredential") as mock_credential, patch(
+            "azure.monitor.ingestion.LogsIngestionClient"
+        ) as mock_logs_client_class:
             mock_credential_instance = Mock()
             mock_credential.return_value = mock_credential_instance
 
@@ -291,16 +292,11 @@ class TestAzureMonitorWriter:
             writer.write(iter(rows))
 
             # Check that ClientSecretCredential was called with correct parameters
-            mock_credential.assert_called_once_with(
-                "tenant-id-12345",
-                "client-id-12345",
-                "client-secret-12345"
-            )
+            mock_credential.assert_called_once_with("tenant-id-12345", "client-id-12345", "client-secret-12345")
 
             # Check that LogsIngestionClient was created with correct parameters
             mock_logs_client_class.assert_called_once_with(
-                "https://test-dce.monitor.azure.com",
-                mock_credential_instance
+                "https://test-dce.monitor.azure.com", mock_credential_instance
             )
 
 

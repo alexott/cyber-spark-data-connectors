@@ -1,11 +1,11 @@
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import date, datetime
 
 from azure.monitor.ingestion import LogsIngestionClient
-from pyspark.errors.exceptions.base import PySparkNotImplementedError
 from pyspark.sql.datasource import (
     DataSource,
     DataSourceReader,
+    DataSourceStreamReader,
     DataSourceStreamWriter,
     DataSourceWriter,
     InputPartition,
@@ -183,13 +183,13 @@ def _convert_value_to_schema_type(value, spark_type):
         elif isinstance(spark_type, (IntegerType, LongType)):
             if isinstance(value, bool):
                 # Don't convert bool to int (bool is subclass of int in Python)
-                raise ValueError(f"Cannot convert boolean to integer")
+                raise ValueError("Cannot convert boolean to integer")
             return int(value)
 
         # Float types
         elif isinstance(spark_type, (FloatType, DoubleType)):
             if isinstance(value, bool):
-                raise ValueError(f"Cannot convert boolean to float")
+                raise ValueError("Cannot convert boolean to float")
             return float(value)
 
         # Timestamp type
@@ -264,13 +264,11 @@ class AzureMonitorDataSource(DataSource):
             StructType: The schema of the data
 
         """
-        
         infer_schema = self.options.get("inferSchema", "true").lower() == "true"
         if infer_schema:
             return self._infer_read_schema()
         else:
             raise Exception("Must provide schema if inferSchema is false")
-        
 
     def _infer_read_schema(self):
         """Infer schema by executing a sample query with limit 1.
@@ -284,13 +282,13 @@ class AzureMonitorDataSource(DataSource):
         """
         from pyspark.sql.types import (
             BooleanType,
+            DateType,
             DoubleType,
             LongType,
             StringType,
             StructField,
             StructType,
             TimestampType,
-            DateType,
         )
 
         # Get read options
@@ -380,6 +378,9 @@ class AzureMonitorDataSource(DataSource):
 
     def reader(self, schema: StructType):
         return AzureMonitorBatchReader(self.options, schema)
+
+    def streamReader(self, schema: StructType):
+        return AzureMonitorStreamReader(self.options, schema)
 
     def streamWriter(self, schema: StructType, overwrite: bool):
         return AzureMonitorStreamWriter(self.options)
@@ -519,6 +520,234 @@ class AzureMonitorBatchReader(DataSourceReader):
                         row_dict[schema_column_name] = None
 
                 yield Row(**row_dict)
+
+
+class AzureMonitorOffset:
+    """Represents the offset for Azure Monitor streaming.
+
+    The offset tracks the timestamp of the last processed data to enable incremental streaming.
+    """
+
+    def __init__(self, timestamp: str):
+        """Initialize offset with ISO 8601 timestamp.
+
+        Args:
+            timestamp: ISO 8601 formatted timestamp string (e.g., "2024-01-01T00:00:00Z")
+
+        """
+        self.timestamp = timestamp
+
+    def json(self):
+        """Serialize offset to JSON string.
+
+        Returns:
+            JSON string representation of the offset
+
+        """
+        import json
+
+        return json.dumps({"timestamp": self.timestamp})
+
+    @staticmethod
+    def from_json(json_str: str):
+        """Deserialize offset from JSON string.
+
+        Args:
+            json_str: JSON string containing offset data
+
+        Returns:
+            AzureMonitorOffset instance
+
+        """
+        import json
+
+        data = json.loads(json_str)
+        return AzureMonitorOffset(data["timestamp"])
+
+
+class AzureMonitorStreamReader(DataSourceStreamReader):
+    """Stream reader for Azure Monitor / Log Analytics workspaces.
+
+    Implements incremental streaming by tracking time-based offsets and splitting
+    time ranges into partitions for parallel processing.
+    """
+
+    def __init__(self, options, schema: StructType):
+        """Initialize the stream reader with options and schema.
+
+        Args:
+            options: Dictionary of options containing workspace_id, query, start_time, credentials
+            schema: StructType schema (provided by DataSource.schema())
+
+        """
+        # Extract and validate required options
+        self.workspace_id = options.get("workspace_id")
+        self.query = options.get("query")
+        self.tenant_id = options.get("tenant_id")
+        self.client_id = options.get("client_id")
+        self.client_secret = options.get("client_secret")
+
+        # Stream-specific options
+        start_time = options.get("start_time", "latest")
+        # Support 'latest' as alias for current timestamp
+        if start_time == "latest":
+            from datetime import datetime, timezone
+
+            self.start_time = datetime.now(timezone.utc).isoformat()
+        else:
+            # Validate that start_time is a valid ISO 8601 timestamp
+            from datetime import datetime
+
+            try:
+                datetime.fromisoformat(start_time.replace("Z", "+00:00"))
+                self.start_time = start_time
+            except (ValueError, AttributeError) as e:
+                raise ValueError(
+                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z')"
+                ) from e
+
+        # Partition duration in seconds (default 1 hour)
+        self.partition_duration = int(options.get("partition_duration", "3600"))
+
+        # Validate required options
+        assert self.workspace_id is not None, "workspace_id is required"
+        assert self.query is not None, "query is required"
+        assert self.tenant_id is not None, "tenant_id is required"
+        assert self.client_id is not None, "client_id is required"
+        assert self.client_secret is not None, "client_secret is required"
+
+        self._schema = schema
+
+    def initialOffset(self):
+        """Return the initial offset (start time).
+
+        Returns:
+            JSON string representation of AzureMonitorOffset with the configured start time
+
+        """
+        return AzureMonitorOffset(self.start_time).json()
+
+    def latestOffset(self):
+        """Return the latest offset (current time).
+
+        Returns:
+            JSON string representation of AzureMonitorOffset with the current UTC timestamp
+
+        """
+        from datetime import datetime, timezone
+
+        current_time = datetime.now(timezone.utc).isoformat()
+        return AzureMonitorOffset(current_time).json()
+
+    def partitions(self, start, end):
+        """Create partitions for the time range between start and end offsets.
+
+        Splits the time range into fixed-duration partitions based on partition_duration.
+
+        Args:
+            start: JSON string representing AzureMonitorOffset for the start of the range
+            end: JSON string representing AzureMonitorOffset for the end of the range
+
+        Returns:
+            List of TimeRangePartition objects
+
+        """
+        from datetime import datetime, timedelta
+
+        # Deserialize JSON strings to offset objects
+        start_offset = AzureMonitorOffset.from_json(start)
+        end_offset = AzureMonitorOffset.from_json(end)
+
+        # Parse timestamps
+        start_time = datetime.fromisoformat(start_offset.timestamp.replace("Z", "+00:00"))
+        end_time = datetime.fromisoformat(end_offset.timestamp.replace("Z", "+00:00"))
+
+        # Calculate total duration
+        total_duration = (end_time - start_time).total_seconds()
+
+        # If total duration is less than partition_duration, create a single partition
+        if total_duration <= self.partition_duration:
+            return [TimeRangePartition(start_time, end_time)]
+
+        # Split into fixed-duration partitions
+        partitions = []
+        current_start = start_time
+        partition_delta = timedelta(seconds=self.partition_duration)
+
+        while current_start < end_time:
+            current_end = min(current_start + partition_delta, end_time)
+            partitions.append(TimeRangePartition(current_start, current_end))
+            # Next partition starts 1 microsecond after current partition ends to avoid overlap
+            current_start = current_end + timedelta(microseconds=1)
+
+        return partitions
+
+    def read(self, partition: TimeRangePartition):
+        """Read data for the given partition time range.
+
+        Args:
+            partition: TimeRangePartition containing start_time and end_time
+
+        Yields:
+            Row objects from the query results
+
+        """
+        # Import inside method for partition-level execution
+        from pyspark.sql import Row
+
+        # Use partition's time range
+        timespan_value = (partition.start_time, partition.end_time)
+
+        # Execute query using module-level function
+        response = _execute_logs_query(
+            workspace_id=self.workspace_id,
+            query=self.query,
+            timespan=timespan_value,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+        )
+
+        # Create a mapping of column names to their expected types from schema
+        schema_field_map = {field.name: field.dataType for field in self._schema.fields}
+
+        # Process all tables in response (reuse same logic as batch reader)
+        for table in response.tables:
+            # Convert Azure Monitor rows to Spark Rows
+            for row_idx, row_data in enumerate(table.rows):
+                row_dict = {}
+
+                # First, process columns from the query results
+                for i, col in enumerate(table.columns):
+                    # Handle both string columns (real API) and objects with .name attribute (test mocks)
+                    column_name = str(col) if isinstance(col, str) else str(col.name)
+                    raw_value = row_data[i]
+
+                    # If column is in schema, convert to expected type
+                    if column_name in schema_field_map:
+                        expected_type = schema_field_map[column_name]
+                        try:
+                            converted_value = _convert_value_to_schema_type(raw_value, expected_type)
+                            row_dict[column_name] = converted_value
+                        except ValueError as e:
+                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}")
+
+                # Second, add NULL values for schema columns that are not in query results
+                for schema_column_name in schema_field_map.keys():
+                    if schema_column_name not in row_dict:
+                        row_dict[schema_column_name] = None
+
+                yield Row(**row_dict)
+
+    def commit(self, end):
+        """Called when a batch is successfully processed.
+
+        Args:
+            end: AzureMonitorOffset representing the end of the committed batch
+
+        """
+        # Nothing special needed - Spark handles checkpointing
+        pass
 
 
 # https://learn.microsoft.com/en-us/python/api/overview/azure/monitor-ingestion-readme?view=azure-python

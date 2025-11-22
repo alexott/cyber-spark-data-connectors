@@ -2,10 +2,10 @@
 
 import json
 from datetime import datetime
-from unittest.mock import MagicMock, Mock, patch
+from unittest.mock import Mock, patch
 
 import pytest
-from pyspark.sql.types import Row, StructField, StructType, IntegerType, StringType, TimestampType
+from pyspark.sql.types import IntegerType, Row, StringType, StructField, StructType, TimestampType
 
 from cyber_connectors.Splunk import SplunkDataSource, SplunkHecBatchWriter, SplunkHecStreamWriter
 
@@ -13,20 +13,19 @@ from cyber_connectors.Splunk import SplunkDataSource, SplunkHecBatchWriter, Splu
 @pytest.fixture
 def basic_options():
     """Basic required options for Splunk data source."""
-    return {
-        "url": "http://localhost:8088/services/collector/event",
-        "token": "test-token-12345"
-    }
+    return {"url": "http://localhost:8088/services/collector/event", "token": "test-token-12345"}
 
 
 @pytest.fixture
 def sample_schema():
     """Sample schema for testing."""
-    return StructType([
-        StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
-        StructField("timestamp", TimestampType(), True)
-    ])
+    return StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("name", StringType(), True),
+            StructField("timestamp", TimestampType(), True),
+        ]
+    )
 
 
 class TestSplunkDataSource:
@@ -83,7 +82,7 @@ class TestSplunkHecWriter:
             "sourcetype": "custom",
             "single_event_column": "message",
             "indexed_fields": "field1,field2",
-            "remove_indexed_fields": "true"
+            "remove_indexed_fields": "true",
         }
         writer = SplunkHecBatchWriter(options)
         assert writer.time_col == "ts"
@@ -98,16 +97,12 @@ class TestSplunkHecWriter:
 
     def test_single_event_column_changes_sourcetype(self):
         """Test that single_event_column changes sourcetype to 'text' if default."""
-        options = {
-            "url": "http://localhost:8088",
-            "token": "test-token",
-            "single_event_column": "message"
-        }
+        options = {"url": "http://localhost:8088", "token": "test-token", "single_event_column": "message"}
         writer = SplunkHecBatchWriter(options)
         assert writer.source_type == "text"
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.Splunk.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.Splunk.get_http_session")
     def test_write_basic(self, mock_get_session, mock_task_context, basic_options):
         """Test basic write functionality."""
         mock_context = Mock()
@@ -129,8 +124,8 @@ class TestSplunkHecWriter:
         assert commit_msg.count == 1
         assert mock_session.post.called
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.Splunk.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.Splunk.get_http_session")
     def test_write_with_time_column(self, mock_get_session, mock_task_context):
         """Test write with time_column option."""
         mock_context = Mock()
@@ -144,11 +139,7 @@ class TestSplunkHecWriter:
         mock_session.post.return_value = mock_response
         mock_get_session.return_value = mock_session
 
-        options = {
-            "url": "http://localhost:8088",
-            "token": "test-token",
-            "time_column": "timestamp"
-        }
+        options = {"url": "http://localhost:8088", "token": "test-token", "time_column": "timestamp"}
         writer = SplunkHecBatchWriter(options)
 
         timestamp = datetime(2024, 1, 1, 12, 0, 0)
@@ -157,12 +148,12 @@ class TestSplunkHecWriter:
 
         assert commit_msg.count == 1
         call_args = mock_session.post.call_args
-        data = call_args[1]['data']
+        data = call_args[1]["data"]
         payload = json.loads(data)
-        assert payload['time'] == timestamp.timestamp()
+        assert payload["time"] == timestamp.timestamp()
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.Splunk.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.Splunk.get_http_session")
     def test_write_with_indexed_fields(self, mock_get_session, mock_task_context):
         """Test write with indexed_fields option."""
         mock_context = Mock()
@@ -176,11 +167,7 @@ class TestSplunkHecWriter:
         mock_session.post.return_value = mock_response
         mock_get_session.return_value = mock_session
 
-        options = {
-            "url": "http://localhost:8088",
-            "token": "test-token",
-            "indexed_fields": "field1,field2"
-        }
+        options = {"url": "http://localhost:8088", "token": "test-token", "indexed_fields": "field1,field2"}
         writer = SplunkHecBatchWriter(options)
 
         rows = [Row(id=1, field1="value1", field2="value2", field3="value3")]
@@ -188,15 +175,15 @@ class TestSplunkHecWriter:
 
         assert commit_msg.count == 1
         call_args = mock_session.post.call_args
-        data = call_args[1]['data']
+        data = call_args[1]["data"]
         payload = json.loads(data)
-        assert 'fields' in payload
-        assert payload['fields']['field1'] == "value1"
-        assert payload['fields']['field2'] == "value2"
-        assert 'event' in payload
+        assert "fields" in payload
+        assert payload["fields"]["field1"] == "value1"
+        assert payload["fields"]["field2"] == "value2"
+        assert "event" in payload
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.Splunk.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.Splunk.get_http_session")
     def test_write_with_single_event_column(self, mock_get_session, mock_task_context):
         """Test write with single_event_column option."""
         mock_context = Mock()
@@ -210,11 +197,7 @@ class TestSplunkHecWriter:
         mock_session.post.return_value = mock_response
         mock_get_session.return_value = mock_session
 
-        options = {
-            "url": "http://localhost:8088",
-            "token": "test-token",
-            "single_event_column": "message"
-        }
+        options = {"url": "http://localhost:8088", "token": "test-token", "single_event_column": "message"}
         writer = SplunkHecBatchWriter(options)
 
         rows = [Row(id=1, message="This is a log message")]
@@ -222,13 +205,13 @@ class TestSplunkHecWriter:
 
         assert commit_msg.count == 1
         call_args = mock_session.post.call_args
-        data = call_args[1]['data']
+        data = call_args[1]["data"]
         payload = json.loads(data)
-        assert payload['event'] == "This is a log message"
-        assert payload['sourcetype'] == "text"
+        assert payload["event"] == "This is a log message"
+        assert payload["sourcetype"] == "text"
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.Splunk.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.Splunk.get_http_session")
     def test_write_batching(self, mock_get_session, mock_task_context):
         """Test that batching works correctly."""
         mock_context = Mock()
@@ -242,11 +225,7 @@ class TestSplunkHecWriter:
         mock_session.post.return_value = mock_response
         mock_get_session.return_value = mock_session
 
-        options = {
-            "url": "http://localhost:8088",
-            "token": "test-token",
-            "batch_size": "2"
-        }
+        options = {"url": "http://localhost:8088", "token": "test-token", "batch_size": "2"}
         writer = SplunkHecBatchWriter(options)
 
         rows = [Row(id=i) for i in range(5)]

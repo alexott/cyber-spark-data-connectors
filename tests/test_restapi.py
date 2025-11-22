@@ -5,27 +5,27 @@ from datetime import datetime
 from unittest.mock import Mock, patch
 
 import pytest
-from pyspark.sql.types import Row, StructField, StructType, IntegerType, StringType, TimestampType
+from pyspark.sql.types import IntegerType, Row, StringType, StructField, StructType, TimestampType
 
-from cyber_connectors.RestApi import RestApiDataSource, RestApiBatchWriter, RestApiStreamWriter
+from cyber_connectors.RestApi import RestApiBatchWriter, RestApiDataSource, RestApiStreamWriter
 
 
 @pytest.fixture
 def basic_options():
     """Basic required options for REST API data source."""
-    return {
-        "url": "http://localhost:8001/api/endpoint"
-    }
+    return {"url": "http://localhost:8001/api/endpoint"}
 
 
 @pytest.fixture
 def sample_schema():
     """Sample schema for testing."""
-    return StructType([
-        StructField("id", IntegerType(), True),
-        StructField("name", StringType(), True),
-        StructField("timestamp", TimestampType(), True)
-    ])
+    return StructType(
+        [
+            StructField("id", IntegerType(), True),
+            StructField("name", StringType(), True),
+            StructField("timestamp", TimestampType(), True),
+        ]
+    )
 
 
 class TestRestApiDataSource:
@@ -65,42 +65,30 @@ class TestRestApiWriter:
 
     def test_init_with_custom_format(self):
         """Test initialization with custom format."""
-        options = {
-            "url": "http://localhost:8001",
-            "http_format": "json"
-        }
+        options = {"url": "http://localhost:8001", "http_format": "json"}
         writer = RestApiBatchWriter(options)
         assert writer.payload_format == "json"
 
     def test_init_with_custom_method(self):
         """Test initialization with custom HTTP method."""
-        options = {
-            "url": "http://localhost:8001",
-            "http_method": "put"
-        }
+        options = {"url": "http://localhost:8001", "http_method": "put"}
         writer = RestApiBatchWriter(options)
         assert writer.http_method == "put"
 
     def test_init_invalid_format(self):
         """Test that invalid format raises assertion error."""
-        options = {
-            "url": "http://localhost:8001",
-            "http_format": "xml"
-        }
+        options = {"url": "http://localhost:8001", "http_format": "xml"}
         with pytest.raises(AssertionError):
             RestApiBatchWriter(options)
 
     def test_init_invalid_method(self):
         """Test that invalid HTTP method raises assertion error."""
-        options = {
-            "url": "http://localhost:8001",
-            "http_method": "delete"
-        }
+        options = {"url": "http://localhost:8001", "http_method": "delete"}
         with pytest.raises(AssertionError):
             RestApiBatchWriter(options)
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.RestApi.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_basic_post(self, mock_get_session, mock_task_context, basic_options):
         """Test basic write functionality with POST."""
         mock_context = Mock()
@@ -124,8 +112,8 @@ class TestRestApiWriter:
         call_args = mock_session.post.call_args
         assert call_args[0][0] == "http://localhost:8001/api/endpoint"
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.RestApi.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_with_put(self, mock_get_session, mock_task_context):
         """Test write functionality with PUT method."""
         mock_context = Mock()
@@ -139,10 +127,7 @@ class TestRestApiWriter:
         mock_session.put.return_value = mock_response
         mock_get_session.return_value = mock_session
 
-        options = {
-            "url": "http://localhost:8001",
-            "http_method": "put"
-        }
+        options = {"url": "http://localhost:8001", "http_method": "put"}
         writer = RestApiBatchWriter(options)
         rows = [Row(id=1, name="test")]
         commit_msg = writer.write(iter(rows))
@@ -151,8 +136,8 @@ class TestRestApiWriter:
         assert mock_session.put.called
         assert not mock_session.post.called
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.RestApi.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_json_format(self, mock_get_session, mock_task_context, basic_options):
         """Test that data is properly serialized to JSON."""
         mock_context = Mock()
@@ -173,14 +158,14 @@ class TestRestApiWriter:
 
         assert commit_msg.count == 1
         call_args = mock_session.post.call_args
-        data = call_args[1]['data']
+        data = call_args[1]["data"]
         payload = json.loads(data)
-        assert payload['id'] == 1
-        assert payload['name'] == "test"
-        assert 'timestamp' in payload
+        assert payload["id"] == 1
+        assert payload["name"] == "test"
+        assert "timestamp" in payload
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.RestApi.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_multiple_rows(self, mock_get_session, mock_task_context, basic_options):
         """Test writing multiple rows."""
         mock_context = Mock()
@@ -201,8 +186,8 @@ class TestRestApiWriter:
         assert commit_msg.count == 5
         assert mock_session.post.call_count == 5
 
-    @patch('pyspark.TaskContext')
-    @patch('cyber_connectors.RestApi.get_http_session')
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_content_type_header(self, mock_get_session, mock_task_context, basic_options):
         """Test that Content-Type header is set correctly."""
         mock_context = Mock()
@@ -222,8 +207,8 @@ class TestRestApiWriter:
 
         # Check that get_http_session was called with correct headers
         call_args = mock_get_session.call_args
-        headers = call_args[1]['additional_headers']
-        assert headers['Content-Type'] == 'application/json'
+        headers = call_args[1]["additional_headers"]
+        assert headers["Content-Type"] == "application/json"
 
 
 class TestRestApiStreamWriter:
