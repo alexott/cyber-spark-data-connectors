@@ -397,14 +397,17 @@ class MicrosoftSentinelDataSource(AzureMonitorDataSource):
         return "ms-sentinel"
 
 
-class AzureMonitorBatchReader(DataSourceReader):
-    """Reader for Azure Monitor / Log Analytics workspaces."""
+class AzureMonitorReader:
+    """Base reader class for Azure Monitor / Log Analytics workspaces.
+    
+    Shared read logic for batch and streaming reads.
+    """
 
     def __init__(self, options, schema: StructType):
         """Initialize the reader with options and schema.
 
         Args:
-            options: Dictionary of options containing workspace_id, query, time range, credentials
+            options: Dictionary of options containing workspace_id, query, credentials
             schema: StructType schema (provided by DataSource.schema())
 
         """
@@ -415,14 +418,6 @@ class AzureMonitorBatchReader(DataSourceReader):
         self.client_id = options.get("client_id")
         self.client_secret = options.get("client_secret")
 
-        # Time range options (mutually exclusive)
-        timespan = options.get("timespan")
-        start_time = options.get("start_time")
-        end_time = options.get("end_time")
-
-        # Optional options
-        self.num_partitions = int(options.get("num_partitions", "1"))
-
         # Validate required options
         assert self.workspace_id is not None, "workspace_id is required"
         assert self.query is not None, "query is required"
@@ -430,37 +425,8 @@ class AzureMonitorBatchReader(DataSourceReader):
         assert self.client_id is not None, "client_id is required"
         assert self.client_secret is not None, "client_secret is required"
 
-        # Parse time range using module-level function
-        self.start_time, self.end_time = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
-
         # Store schema (provided by DataSource.schema())
         self._schema = schema
-
-    def partitions(self):
-        """Generate list of non-overlapping time range partitions.
-
-        Returns:
-            List of TimeRangePartition objects, each containing start_time and end_time
-
-        """
-        # Calculate total time range duration
-        total_duration = self.end_time - self.start_time
-
-        # Split into N equal partitions
-        partition_duration = total_duration / self.num_partitions
-
-        partitions = []
-        for i in range(self.num_partitions):
-            partition_start = self.start_time + (partition_duration * i)
-            partition_end = self.start_time + (partition_duration * (i + 1))
-
-            # Ensure last partition ends exactly at end_time (avoid rounding errors)
-            if i == self.num_partitions - 1:
-                partition_end = self.end_time
-
-            partitions.append(TimeRangePartition(partition_start, partition_end))
-
-        return partitions
 
     def read(self, partition: TimeRangePartition):
         """Read data for the given partition time range.
@@ -522,6 +488,57 @@ class AzureMonitorBatchReader(DataSourceReader):
                 yield Row(**row_dict)
 
 
+class AzureMonitorBatchReader(AzureMonitorReader, DataSourceReader):
+    """Batch reader for Azure Monitor / Log Analytics workspaces."""
+
+    def __init__(self, options, schema: StructType):
+        """Initialize the batch reader with options and schema.
+
+        Args:
+            options: Dictionary of options containing workspace_id, query, time range, credentials
+            schema: StructType schema (provided by DataSource.schema())
+
+        """
+        super().__init__(options, schema)
+        
+        # Time range options (mutually exclusive)
+        timespan = options.get("timespan")
+        start_time = options.get("start_time")
+        end_time = options.get("end_time")
+
+        # Optional options
+        self.num_partitions = int(options.get("num_partitions", "1"))
+
+        # Parse time range using module-level function
+        self.start_time, self.end_time = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
+
+    def partitions(self):
+        """Generate list of non-overlapping time range partitions.
+
+        Returns:
+            List of TimeRangePartition objects, each containing start_time and end_time
+
+        """
+        # Calculate total time range duration
+        total_duration = self.end_time - self.start_time
+
+        # Split into N equal partitions
+        partition_duration = total_duration / self.num_partitions
+
+        partitions = []
+        for i in range(self.num_partitions):
+            partition_start = self.start_time + (partition_duration * i)
+            partition_end = self.start_time + (partition_duration * (i + 1))
+
+            # Ensure last partition ends exactly at end_time (avoid rounding errors)
+            if i == self.num_partitions - 1:
+                partition_end = self.end_time
+
+            partitions.append(TimeRangePartition(partition_start, partition_end))
+
+        return partitions
+
+
 class AzureMonitorOffset:
     """Represents the offset for Azure Monitor streaming.
 
@@ -565,7 +582,7 @@ class AzureMonitorOffset:
         return AzureMonitorOffset(data["timestamp"])
 
 
-class AzureMonitorStreamReader(DataSourceStreamReader):
+class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
     """Stream reader for Azure Monitor / Log Analytics workspaces.
 
     Implements incremental streaming by tracking time-based offsets and splitting
@@ -580,13 +597,8 @@ class AzureMonitorStreamReader(DataSourceStreamReader):
             schema: StructType schema (provided by DataSource.schema())
 
         """
-        # Extract and validate required options
-        self.workspace_id = options.get("workspace_id")
-        self.query = options.get("query")
-        self.tenant_id = options.get("tenant_id")
-        self.client_id = options.get("client_id")
-        self.client_secret = options.get("client_secret")
-
+        super().__init__(options, schema)
+        
         # Stream-specific options
         start_time = options.get("start_time", "latest")
         # Support 'latest' as alias for current timestamp
@@ -608,15 +620,6 @@ class AzureMonitorStreamReader(DataSourceStreamReader):
 
         # Partition duration in seconds (default 1 hour)
         self.partition_duration = int(options.get("partition_duration", "3600"))
-
-        # Validate required options
-        assert self.workspace_id is not None, "workspace_id is required"
-        assert self.query is not None, "query is required"
-        assert self.tenant_id is not None, "tenant_id is required"
-        assert self.client_id is not None, "client_id is required"
-        assert self.client_secret is not None, "client_secret is required"
-
-        self._schema = schema
 
     def initialOffset(self):
         """Return the initial offset (start time).
@@ -681,63 +684,6 @@ class AzureMonitorStreamReader(DataSourceStreamReader):
             current_start = current_end + timedelta(microseconds=1)
 
         return partitions
-
-    def read(self, partition: TimeRangePartition):
-        """Read data for the given partition time range.
-
-        Args:
-            partition: TimeRangePartition containing start_time and end_time
-
-        Yields:
-            Row objects from the query results
-
-        """
-        # Import inside method for partition-level execution
-        from pyspark.sql import Row
-
-        # Use partition's time range
-        timespan_value = (partition.start_time, partition.end_time)
-
-        # Execute query using module-level function
-        response = _execute_logs_query(
-            workspace_id=self.workspace_id,
-            query=self.query,
-            timespan=timespan_value,
-            tenant_id=self.tenant_id,
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-        )
-
-        # Create a mapping of column names to their expected types from schema
-        schema_field_map = {field.name: field.dataType for field in self._schema.fields}
-
-        # Process all tables in response (reuse same logic as batch reader)
-        for table in response.tables:
-            # Convert Azure Monitor rows to Spark Rows
-            for row_idx, row_data in enumerate(table.rows):
-                row_dict = {}
-
-                # First, process columns from the query results
-                for i, col in enumerate(table.columns):
-                    # Handle both string columns (real API) and objects with .name attribute (test mocks)
-                    column_name = str(col) if isinstance(col, str) else str(col.name)
-                    raw_value = row_data[i]
-
-                    # If column is in schema, convert to expected type
-                    if column_name in schema_field_map:
-                        expected_type = schema_field_map[column_name]
-                        try:
-                            converted_value = _convert_value_to_schema_type(raw_value, expected_type)
-                            row_dict[column_name] = converted_value
-                        except ValueError as e:
-                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}")
-
-                # Second, add NULL values for schema columns that are not in query results
-                for schema_column_name in schema_field_map.keys():
-                    if schema_column_name not in row_dict:
-                        row_dict[schema_column_name] = None
-
-                yield Row(**row_dict)
 
     def commit(self, end):
         """Called when a batch is successfully processed.
