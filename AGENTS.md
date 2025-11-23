@@ -2,6 +2,11 @@
 
 This file provides guidance to LLM when working with code in this repository.
 
+You're experienced senior developer with background in Cybersecurity.  You're developing a
+library of custom Python data sources to simplify work (read/write) with data in different
+cybersecurity-related products.  You follow the architecture and development guidelines
+outlined below.
+
 ## Project Overview
 
 This repository contains source code of different custom Python data sources (part of
@@ -9,8 +14,8 @@ Apache Spark API) related to Cybersecurity.  These data sources allows to read f
 write to different Cybersecurity solutions in batch and/or streaming manner.
 
 **Architecture**: Simple, flat structure with one data source per file. Each data source implements:
-- `DataSource` base class with `name()`, `writer()`, and `streamWriter()` methods
-- Separate writer classes for batch (`DataSourceWriter`) and streaming (`DataSourceStreamWriter`)
+- `DataSource` base class with `name()`, `reader`, `streamReader`, `writer()`, and `streamWriter()` methods
+- Separate writer classes for batch (`DataSourceWriter`, `DataSourceReader`) and streaming (`DataSourceStreamWriter`, `DataSourceStreamReader`)
 - Shared writer logic in a common base class (e.g., `SplunkHecWriter`)
 
 ### Documentation and examples of custom data sources using the same API
@@ -39,18 +44,20 @@ More information could be found in the documentation:
 
 ### Data Source Implementation Pattern
 
-Each data source follows this structure (see `cyber_connectors/Splunk.py` as reference):
+Most of data source follows this structure (see `cyber_connectors/Splunk.py` as reference):
 
 1. **DataSource class**: Entry point, returns appropriate writers
    - Implements `name()` class method (returns format name like "splunk")
-   - Implements `writer()` for batch operations
-   - Implements `streamWriter()` for streaming operations
+   - Implements `writer()` for batch write operations
+   - Implements `streamWriter()` for streaming write operations
+   - Implements `reader()` for batch read operations
+   - Implements `streamReader()` for streaming read operations
+   - Implements `schema` to return a predefined schema for read operations (it could be automatically generated from the response, but it could be slower compared to predefined schema).
 
-2. **Base Writer class**: Shared logic for batch and streaming
+2. **Base Writer class**: Shared write logic for batch and streaming
    - Extracts and validates options in `__init__`
    - Implements `write(iterator)` that processes rows and returns `SimpleCommitMessage`
-   - Uses `get_http_session()` from `common.py` for HTTP operations with retries
-   - Batches records before sending (configurable via `batch_size` option)
+   - May batch records before sending (configurable via `batch_size` option)
 
 3. **Batch Writer class**: Inherits from base writer + `DataSourceWriter`
    - No additional methods needed
@@ -58,6 +65,18 @@ Each data source follows this structure (see `cyber_connectors/Splunk.py` as ref
 4. **Stream Writer class**: Inherits from base writer + `DataSourceStreamWriter`
    - Implements `commit()` (handles successful batch completion)
    - Implements `abort()` (handles failed batch)
+
+5. **Base Reader class**: Shared read logic for batch and streaming reads
+   - Extracts and validates base options in `__init__`
+   - Implements `partitions()` to distribute reads over multiple executors (if it's possible).  The custom class could be used to specify partition information (it should be inherited from `InputPartition`).
+   - Implements `read` to get data for a specific partition.
+
+6. **Batch Reader class**: Inherits from base reader + `DataSourceReader`.
+   - No additional methods needed
+
+7. **Stream Reader class**:  Inherits from base reader + `DataSourceStreamReader`.
+   - `initialOffset` - returns initial offset provided during the first initialization (or inferred automatically).  The offset class should implement `json` and `from_json` methods.
+   - `latestOffset` - returns the latest available offset.
 
 ### Common Utilities (`cyber_connectors/common.py`)
 
@@ -81,12 +100,41 @@ Follow this checklist (use existing sources as templates):
 2. Implement `YourSourceDataSource(DataSource)` with `name()`, `writer()`, `streamWriter()`
 3. Implement base writer class with:
    - Options validation in `__init__`
-   - `write(iterator)` method with batch logic
-   - Use `get_http_session()` for HTTP calls
+   - `write(iterator)` method with write logic
 4. Implement batch and stream writer classes (minimal boilerplate)
-5. Add exports to `cyber_connectors/__init__.py`
-6. Create test file `tests/test_yoursource.py` with unit tests
-7. Update README.md with usage examples and options
+5. Implement base reader class with:
+   - Options validation in `__init__`
+   - `read(partition)` method with read logic
+   - `partitions(start, end)` method to split data into partitions
+6. Implement batch and stream writer classes (minimal boilerplate)
+7. Add exports to `cyber_connectors/__init__.py`
+8. Create test file `tests/test_yoursource.py` with unit tests
+9. Update README.md with usage examples and options
+
+### Data Source Registration
+
+Users register data sources like this:
+```python
+from cyber_connectors import SplunkDataSource
+spark.dataSource.register(SplunkDataSource)
+
+# Then use with .format("splunk")
+df.write.format("splunk").option("url", "...").save()
+```
+
+## Current Data Sources
+
+1. **Splunk** (`splunk`): Write to Splunk HEC endpoint
+   - Supports indexed fields, custom event columns, metadata
+   - See `cyber_connectors/Splunk.py`
+
+2. **Microsoft Sentinel** (`ms-sentinel` / `azure-monitor`): Write to and read from Azure Monitor/Sentinel
+   - Uses Azure service principal authentication
+   - See `cyber_connectors/MsSentinel.py`
+
+3. **REST API** (`rest`): Generic REST API writer
+   - Supports POST/PUT with JSON payload
+   - See `cyber_connectors/RestApi.py`
 
 ## 🚨 SENIOR DEVELOPER GUIDELINES 🚨
 
@@ -141,7 +189,7 @@ Before adding any code, ask yourself:
 # ✅ CORRECT
 poetry run python script.py
 
-# ❌ WRONG  
+# ❌ WRONG
 python script.py
 ```
 
@@ -211,37 +259,12 @@ poetry run mypy cyber_connectors/
 
 ## Important Notes
 
-- **Python version**: 3.9-3.13 (defined in `pyproject.toml`)
+- **Python version**: 3.10-3.13 (defined in `pyproject.toml`)
 - **Spark version**: 4.0.1+ required (PySpark DataSource API)
 - **Dependencies**: Keep minimal - only add if critically needed
 - **Never use direct `python` commands**: Always use `poetry run python`
 - **Ruff configuration**: Line length 120, enforces docstrings, isort, flake8-bugbear
 - **No premature optimization**: Focus on clarity over performance
-
-## Data Source Registration
-
-Users register data sources like this:
-```python
-from cyber_connectors import SplunkDataSource
-spark.dataSource.register(SplunkDataSource)
-
-# Then use with .format("splunk")
-df.write.format("splunk").option("url", "...").save()
-```
-
-## Current Data Sources
-
-1. **Splunk** (`splunk`): Write to Splunk HEC endpoint
-   - Supports indexed fields, custom event columns, metadata
-   - See `cyber_connectors/Splunk.py`
-
-2. **Microsoft Sentinel** (`ms-sentinel` / `azure-monitor`): Write to Azure Monitor/Sentinel
-   - Uses Azure service principal authentication
-   - See `cyber_connectors/MsSentinel.py`
-
-3. **REST API** (`rest`): Generic REST API writer
-   - Supports POST/PUT with JSON payload
-   - See `cyber_connectors/RestApi.py`
 
 ## Summary: What Makes This Project "Senior Developer Approved"
 
