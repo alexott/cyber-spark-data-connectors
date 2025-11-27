@@ -161,6 +161,9 @@ Supported write options:
 
 The data source supports both batch and streaming reads from Azure Monitor / Log Analytics workspaces using KQL (Kusto Query Language) queries.  If schema isn't specified with `.schema`, it will be inferred automatically.
 
+> [!NOTE]
+> For streaming reads of big amounts of data, it's recommended to export necessary tables to EventHubs, and consume from there.
+
 #### Batch Read
 
 Batch read usage:
