@@ -22,7 +22,7 @@ pytest-cov = "^7.0.0"
 pytest-spark = "^0.8.0"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.14.4"
+ruff = "^0.14.6"
 pyspark = {extras = ["sql,connect"], version = "4.0.1"}
 grpcio = ">=1.67.0"
 grpcio-status = ">=1.67.0"
