@@ -42,14 +42,14 @@ typing-extensions = ">=4.0.0"
 
 [[package]]
 name = "azure-monitor-ingestion"
-version = "1.0.4"
+version = "1.1.0"
 description = "Microsoft Azure Monitor Ingestion Client Library for Python"
 optional = false
-python-versions = ">=3.8"
+python-versions = ">=3.9"
 groups = ["main"]
 files = [
-    {file = "azure-monitor-ingestion-1.0.4.tar.gz", hash = "sha256:254d75993a1fe707d198f014aef5a14faa570cee7369b35bb03ae2aa8f99be79"},
-    {file = "azure_monitor_ingestion-1.0.4-py3-none-any.whl", hash = "sha256:c484f60dd75deb56f1625c12c09cedbda545fcdc4f417396c510fa2efb2fe9c1"},
+    {file = "azure_monitor_ingestion-1.1.0-py3-none-any.whl", hash = "sha256:41765fb3df8e0933f1a7eaf1cb0a5f30acce856afa8831bfa4777ad26594f019"},
+    {file = "azure_monitor_ingestion-1.1.0.tar.gz", hash = "sha256:97afee780d9ae3069128cde77027d4cc62fa824fe64d5bac880ac4a64b0a0c4e"},
 ]
 
 [package.dependencies]
@@ -1276,4 +1276,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.9,<3.14"
-content-hash = "9f60d2d272f1f09fe5c9d7431ad48f3f48b7beaaac21c89115cb5e7d52626c59"
+content-hash = "dbdc9dd42356669a5fe74cb43eedd5b5302392a47ea75e26413b25bddd5f10e6"
