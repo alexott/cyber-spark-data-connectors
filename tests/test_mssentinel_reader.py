@@ -625,12 +625,20 @@ class TestAzureMonitorBatchReader:
     @patch("azure.monitor.query.LogsQueryClient")
     @patch("azure.identity.ClientSecretCredential")
     def test_read_query_failure(self, mock_credential, mock_client, basic_options, basic_schema):
-        """Test handling of query failure."""
+        """Test handling of query failure (PARTIAL status for non-size-limit reasons)."""
         from azure.monitor.query import LogsQueryStatus
 
-        # Create mock response with failure status
+        # Create mock response with PARTIAL status (non-size-limit error)
         mock_response = Mock()
         mock_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict for partial_error to avoid Mock auto-creation issues
+        mock_response.partial_error = {
+            "code": "SomeOtherError",
+            "message": "Query timeout occurred",
+            "details": None,
+            "innererror": None,
+        }
+        mock_response.tables = []
 
         # Setup mock client
         mock_client_instance = Mock()
@@ -1145,3 +1153,595 @@ class TestAzureMonitorBatchReader:
         assert not hasattr(rows[0], "Extra")  # Extra column ignored
         assert rows[1].Name == "Bob"
         assert not hasattr(rows[1], "Extra")  # Extra column ignored
+
+
+class TestRetryLogic:
+    """Test retry logic for HTTP 429 throttling errors."""
+
+    @pytest.fixture
+    def basic_options(self):
+        """Basic valid options for reader."""
+        return {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    @patch("time.sleep")
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_retry_on_429_with_retry_after_header(self, mock_credential, mock_client, mock_sleep):
+        """Test that 429 errors are retried using Retry-After header."""
+        from azure.core.exceptions import HttpResponseError
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        # First call raises 429 with Retry-After header, second succeeds
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        error_response = Mock()
+        error_response.headers = {"Retry-After": "5"}
+        http_error = HttpResponseError(response=error_response)
+        http_error.status_code = 429
+        http_error.response = error_response
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.side_effect = [http_error, mock_response]
+        mock_client.return_value = mock_client_instance
+
+        # Execute query
+        result = _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            tenant_id="test",
+            client_id="test",
+            client_secret="test",
+        )
+
+        # Verify retry was called with Retry-After value
+        mock_sleep.assert_called_once_with(5)
+        assert mock_client_instance.query_workspace.call_count == 2
+        assert result.status == LogsQueryStatus.SUCCESS
+
+    @patch("time.sleep")
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_retry_with_exponential_backoff(self, mock_credential, mock_client, mock_sleep):
+        """Test exponential backoff when Retry-After header is absent."""
+        from azure.core.exceptions import HttpResponseError
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        # Three 429 errors, then success
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        error_response = Mock()
+        error_response.headers = {}  # No Retry-After header
+        http_error = HttpResponseError(response=error_response)
+        http_error.status_code = 429
+        http_error.response = error_response
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.side_effect = [
+            http_error,
+            http_error,
+            http_error,
+            mock_response,
+        ]
+        mock_client.return_value = mock_client_instance
+
+        # Execute query with initial_backoff=1.0
+        result = _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            tenant_id="test",
+            client_id="test",
+            client_secret="test",
+            initial_backoff=1.0,
+        )
+
+        # Verify exponential backoff: 1.0, 2.0, 4.0
+        assert mock_sleep.call_count == 3
+        sleep_calls = [call[0][0] for call in mock_sleep.call_args_list]
+        assert sleep_calls == [1.0, 2.0, 4.0]
+        assert result.status == LogsQueryStatus.SUCCESS
+
+    @patch("time.sleep")
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_max_retries_exceeded_raises_error(self, mock_credential, mock_client, mock_sleep):
+        """Test that exceeding max_retries raises the original error."""
+        from azure.core.exceptions import HttpResponseError
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        # Always raise 429 error
+        error_response = Mock()
+        error_response.headers = {}
+        http_error = HttpResponseError(response=error_response)
+        http_error.status_code = 429
+        http_error.response = error_response
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.side_effect = http_error
+        mock_client.return_value = mock_client_instance
+
+        # Execute with max_retries=2
+        with pytest.raises(HttpResponseError) as exc_info:
+            _execute_logs_query(
+                workspace_id="test",
+                query="test",
+                timespan=(datetime.now(), datetime.now()),
+                tenant_id="test",
+                client_id="test",
+                client_secret="test",
+                max_retries=2,
+            )
+
+        assert exc_info.value.status_code == 429
+        # Should have attempted 3 times (initial + 2 retries)
+        assert mock_client_instance.query_workspace.call_count == 3
+        assert mock_sleep.call_count == 2
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_non_429_error_not_retried(self, mock_credential, mock_client):
+        """Test that non-429 HTTP errors are not retried."""
+        from azure.core.exceptions import HttpResponseError
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        # Raise a 500 error
+        error_response = Mock()
+        error_response.headers = {}
+        http_error = HttpResponseError(response=error_response)
+        http_error.status_code = 500
+        http_error.response = error_response
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.side_effect = http_error
+        mock_client.return_value = mock_client_instance
+
+        # Should raise immediately without retries
+        with pytest.raises(HttpResponseError) as exc_info:
+            _execute_logs_query(
+                workspace_id="test",
+                query="test",
+                timespan=(datetime.now(), datetime.now()),
+                tenant_id="test",
+                client_id="test",
+                client_secret="test",
+            )
+
+        assert exc_info.value.status_code == 500
+        assert mock_client_instance.query_workspace.call_count == 1
+
+
+class TestTimeRangeSubdivision:
+    """Test time range subdivision for large result sets."""
+
+    @pytest.fixture
+    def basic_options(self):
+        """Basic valid options for reader."""
+        return {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_partial_due_to_size_triggers_subdivision(self, mock_credential, mock_client, basic_options, basic_schema):
+        """Test that PARTIAL status due to size limits triggers time range subdivision."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # First call returns PARTIAL with size limit error, subsequent calls succeed
+        partial_response = Mock()
+        partial_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict to avoid Mock auto-creation issues
+        partial_response.partial_error = {
+            "code": "QueryExecutionResultSizeLimitExceeded",
+            "message": "Result size limit exceeded",
+            "details": None,
+            "innererror": None,
+        }
+        partial_response.tables = []
+
+        success_response = Mock()
+        success_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["value1"]]
+        success_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        # First call PARTIAL, next two calls (for subdivided ranges) succeed
+        mock_client_instance.query_workspace.side_effect = [
+            partial_response,
+            success_response,
+            success_response,
+        ]
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(basic_options, basic_schema)
+        partitions = reader.partitions()
+        rows = list(reader.read(partitions[0]))
+
+        # Should have read from both subdivided partitions
+        assert mock_client_instance.query_workspace.call_count == 3
+        assert len(rows) == 2  # One row from each sub-partition
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_failure_due_to_size_triggers_subdivision(self, mock_credential, mock_client, basic_options, basic_schema):
+        """Test that FAILURE status due to size limits also triggers time range subdivision."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Azure may return FAILURE (not PARTIAL) for size limit errors
+        failure_response = Mock()
+        failure_response.status = LogsQueryStatus.FAILURE
+        # Real-world nested error structure from Azure
+        failure_response.partial_error = {
+            "code": "PartialError",
+            "message": "There were some errors when processing your query.",
+            "details": [
+                {
+                    "code": "EngineError",
+                    "message": "Something went wrong processing your query on the server.",
+                    "innererror": {
+                        "code": "-2133196797",
+                        "message": "The results of this query exceed the set limit of 64000000 bytes, "
+                        "so not all records were returned (E_QUERY_RESULT_SET_TOO_LARGE, 0x80DA0003).",
+                    },
+                }
+            ],
+        }
+        failure_response.tables = []
+
+        success_response = Mock()
+        success_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["value1"]]
+        success_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        # First call FAILURE, next two calls (for subdivided ranges) succeed
+        mock_client_instance.query_workspace.side_effect = [
+            failure_response,
+            success_response,
+            success_response,
+        ]
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(basic_options, basic_schema)
+        partitions = reader.partitions()
+        rows = list(reader.read(partitions[0]))
+
+        # Should have read from both subdivided partitions
+        assert mock_client_instance.query_workspace.call_count == 3
+        assert len(rows) == 2  # One row from each sub-partition
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_partial_for_other_reasons_raises_error(self, mock_credential, mock_client, basic_options, basic_schema):
+        """Test that PARTIAL status for non-size reasons raises an error."""
+        from azure.monitor.query import LogsQueryStatus
+
+        partial_response = Mock()
+        partial_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict for partial_error to avoid Mock auto-creation issues
+        partial_response.partial_error = {
+            "code": "SomeOtherError",
+            "message": "Some other error message",
+            "details": None,
+            "innererror": None,
+        }
+        partial_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = partial_response
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(basic_options, basic_schema)
+        partitions = reader.partitions()
+
+        with pytest.raises(Exception, match="Query failed with status"):
+            list(reader.read(partitions[0]))
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_min_partition_prevents_infinite_recursion(self, mock_credential, mock_client, basic_schema):
+        """Test that minimum partition duration prevents infinite subdivision."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Options with very short time range and min_partition_seconds=60
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "start_time": "2024-01-01T00:00:00Z",
+            "end_time": "2024-01-01T00:00:30Z",  # Only 30 seconds
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "min_partition_seconds": "60",
+        }
+
+        # Always return PARTIAL with size limit error
+        partial_response = Mock()
+        partial_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict to avoid Mock auto-creation issues
+        partial_response.partial_error = {
+            "code": "QueryExecutionResultSizeLimitExceeded",
+            "message": "Result size limit exceeded",
+            "details": None,
+            "innererror": None,
+        }
+        partial_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = partial_response
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        partitions = reader.partitions()
+
+        # Should raise error because partition duration (30s) < min_partition_seconds (60s)
+        with pytest.raises(Exception, match="Cannot subdivide partition further"):
+            list(reader.read(partitions[0]))
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_recursive_subdivision(self, mock_credential, mock_client, basic_schema):
+        """Test that subdivision can be recursive if needed."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Options with time range that can be subdivided twice
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "start_time": "2024-01-01T00:00:00Z",
+            "end_time": "2024-01-01T04:00:00Z",  # 4 hours
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "min_partition_seconds": "60",
+        }
+
+        partial_response = Mock()
+        partial_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict to avoid Mock auto-creation issues
+        partial_response.partial_error = {
+            "code": "QueryExecutionResultSizeLimitExceeded",
+            "message": "Result size limit exceeded",
+            "details": None,
+            "innererror": None,
+        }
+        partial_response.tables = []
+
+        success_response = Mock()
+        success_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["value1"]]
+        success_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        # First 3 calls PARTIAL (original + 2 first halves), then 4 success calls for leaves
+        mock_client_instance.query_workspace.side_effect = [
+            partial_response,  # Original 4 hours
+            partial_response,  # First half (0-2h)
+            success_response,  # First quarter (0-1h) - success
+            success_response,  # Second quarter (1-2h) - success
+            partial_response,  # Second half (2-4h)
+            success_response,  # Third quarter (2-3h) - success
+            success_response,  # Fourth quarter (3-4h) - success
+        ]
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        partitions = reader.partitions()
+        rows = list(reader.read(partitions[0]))
+
+        # Should have 4 rows from 4 successful sub-partitions
+        assert len(rows) == 4
+
+    def test_is_result_size_limit_error_by_code(self):
+        """Test _is_result_size_limit_error detects error by code."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        # Test with size limit error code - use dicts to avoid Mock auto-creation
+        response = Mock()
+        response.partial_error = {
+            "code": "QueryExecutionResultSizeLimitExceeded",
+            "message": "",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is True
+
+        response.partial_error = {
+            "code": "ResponsePayloadTooLarge",
+            "message": "",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is True
+
+        response.partial_error = {
+            "code": "E_QUERY_RESULT_SET_TOO_LARGE",
+            "message": "",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is True
+
+        response.partial_error = {
+            "code": "SomeOtherError",
+            "message": "",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is False
+
+    def test_is_result_size_limit_error_by_message(self):
+        """Test _is_result_size_limit_error detects error by message content."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        # Test with error message containing size limit keywords - use dicts
+        response = Mock()
+        response.partial_error = {
+            "code": "UnknownError",
+            "message": "The result size limit was exceeded",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is True
+
+        response.partial_error = {
+            "code": "UnknownError",
+            "message": "Response is too large for processing",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is True
+
+        response.partial_error = {
+            "code": "UnknownError",
+            "message": "Query timeout occurred",
+            "details": None,
+            "innererror": None,
+        }
+        assert _is_result_size_limit_error(response) is False
+
+    def test_is_result_size_limit_error_nested_innererror(self):
+        """Test _is_result_size_limit_error detects error in nested innererror."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        # Real-world error structure from Azure: error in details[0].innererror.message
+        response = Mock()
+        response.partial_error = {
+            "code": "PartialError",
+            "message": "There were some errors when processing your query.",
+            "details": [
+                {
+                    "code": "EngineError",
+                    "message": "Something went wrong processing your query on the server.",
+                    "innererror": {
+                        "code": "-2133196797",
+                        "message": "The results of this query exceed the set limit of 64000000 bytes, "
+                        "so not all records were returned (E_QUERY_RESULT_SET_TOO_LARGE, 0x80DA0003).",
+                    },
+                }
+            ],
+        }
+        assert _is_result_size_limit_error(response) is True
+
+    def test_is_result_size_limit_error_nested_details_object(self):
+        """Test _is_result_size_limit_error detects error in nested details."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        # Error structure with nested details and innererror - all as dicts
+        response = Mock()
+        response.partial_error = {
+            "code": "PartialError",
+            "message": "There were some errors.",
+            "innererror": None,
+            "details": [
+                {
+                    "code": "EngineError",
+                    "message": "Server error",
+                    "details": None,
+                    "innererror": {
+                        "code": "E_QUERY_RESULT_SET_TOO_LARGE",
+                        "message": "Result set too large",
+                        "details": None,
+                        "innererror": None,
+                    },
+                }
+            ],
+        }
+
+        assert _is_result_size_limit_error(response) is True
+
+    def test_is_result_size_limit_error_string_fallback(self):
+        """Test _is_result_size_limit_error detects error via string representation fallback."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        # Simulate an Azure SDK object that has a string representation containing the error
+        # This tests the fallback mechanism when structured parsing fails
+        response = Mock()
+        # Create a mock object whose str() contains the error pattern
+        mock_error = Mock()
+        mock_error.__str__ = Mock(
+            return_value="{'code': 'PartialError', 'message': 'The results of this query exceed "
+            "the set limit (E_QUERY_RESULT_SET_TOO_LARGE)'}"
+        )
+        # Make structured access fail by returning None for all nested fields
+        mock_error.code = "PartialError"
+        mock_error.message = "There were some errors."
+        mock_error.details = None
+        mock_error.innererror = None
+        response.partial_error = mock_error
+
+        assert _is_result_size_limit_error(response) is True
+
+    def test_is_result_size_limit_error_no_error(self):
+        """Test _is_result_size_limit_error returns False when no error."""
+        from cyber_connectors.MsSentinel import _is_result_size_limit_error
+
+        response = Mock()
+        response.partial_error = None
+        assert _is_result_size_limit_error(response) is False
+
+    def test_reader_options_defaults(self, basic_options, basic_schema):
+        """Test that reader uses default values for retry options."""
+        reader = AzureMonitorBatchReader(basic_options, basic_schema)
+
+        assert reader.max_retries == 5
+        assert reader.initial_backoff == 1.0
+        assert reader.min_partition_seconds == 60
+
+    def test_reader_options_custom(self, basic_schema):
+        """Test that reader accepts custom retry options."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "max_retries": "10",
+            "initial_backoff": "2.5",
+            "min_partition_seconds": "120",
+        }
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+
+        assert reader.max_retries == 10
+        assert reader.initial_backoff == 2.5
+        assert reader.min_partition_seconds == 120

@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass
 from datetime import date, datetime
 
@@ -83,6 +84,121 @@ def _parse_time_range(timespan=None, start_time=None, end_time=None):
         raise Exception("Either 'timespan' or 'start_time' must be provided")
 
 
+def _check_error_for_size_limit(error_obj):
+    """Recursively check an error object for size limit indicators.
+
+    Args:
+        error_obj: Error object (dict or object with attributes)
+
+    Returns:
+        bool: True if size limit error is found
+
+    """
+    if error_obj is None:
+        return False
+
+    # Size limit error codes and message patterns
+    size_limit_codes = [
+        "QueryExecutionResultSizeLimitExceeded",
+        "ResponsePayloadTooLarge",
+        "QueryExecutionResponseSizeLimitExceeded",
+        "E_QUERY_RESULT_SET_TOO_LARGE",
+    ]
+    size_limit_patterns = [
+        "size limit",
+        "too large",
+        "e_query_result_set_too_large",
+        "result set too large",
+        "exceed",
+    ]
+
+    # Get code and message from object (handles both dict and object with attributes)
+    code = None
+    message = None
+
+    if isinstance(error_obj, dict):
+        code = error_obj.get("code")
+        message = error_obj.get("message")
+    else:
+        if hasattr(error_obj, "code"):
+            code = error_obj.code
+        if hasattr(error_obj, "message"):
+            message = error_obj.message
+
+    # Check error code
+    if code and code in size_limit_codes:
+        return True
+
+    # Check error message for patterns
+    if message and isinstance(message, str):
+        message_lower = message.lower()
+        for pattern in size_limit_patterns:
+            if pattern in message_lower:
+                return True
+
+    # Check nested 'details' array (can be list of dicts or objects)
+    details = None
+    if isinstance(error_obj, dict):
+        details = error_obj.get("details")
+    elif hasattr(error_obj, "details"):
+        details = getattr(error_obj, "details", None)
+
+    # Only process if details is actually a list/tuple (not Mock or other truthy object)
+    if details is not None and isinstance(details, (list, tuple)):
+        for detail in details:
+            if _check_error_for_size_limit(detail):
+                return True
+
+    # Check nested 'innererror' field
+    innererror = None
+    if isinstance(error_obj, dict):
+        innererror = error_obj.get("innererror")
+    elif hasattr(error_obj, "innererror"):
+        innererror = getattr(error_obj, "innererror", None)
+
+    # Only recurse if innererror is a dict or has code/message attributes (avoid Mock infinite recursion)
+    if innererror is not None and (isinstance(innererror, dict) or hasattr(innererror, "code")):
+        # Prevent infinite recursion by checking if innererror is the same object
+        if innererror is not error_obj and _check_error_for_size_limit(innererror):
+            return True
+
+    return False
+
+
+def _is_result_size_limit_error(response):
+    """Check if a PARTIAL response is due to result size limits being exceeded.
+
+    Args:
+        response: LogsQueryResult with PARTIAL or FAILURE status
+
+    Returns:
+        bool: True if the error is due to result size limits
+
+    """
+    # Check if partial_error exists
+    if not hasattr(response, "partial_error") or response.partial_error is None:
+        return False
+
+    # First try structured check
+    if _check_error_for_size_limit(response.partial_error):
+        return True
+
+    # Fallback: check the string representation for size limit patterns
+    # This handles cases where the Azure SDK returns error in unexpected format
+    error_str = str(response.partial_error).lower()
+    size_limit_patterns = [
+        "e_query_result_set_too_large",
+        "result set too large",
+        "results of this query exceed",
+        "size limit",
+    ]
+    for pattern in size_limit_patterns:
+        if pattern in error_str:
+            return True
+
+    return False
+
+
 def _execute_logs_query(
     workspace_id,
     query,
@@ -90,8 +206,12 @@ def _execute_logs_query(
     tenant_id,
     client_id,
     client_secret,
+    max_retries=5,
+    initial_backoff=1.0,
 ):
     """Execute a KQL query against Azure Monitor Log Analytics workspace.
+
+    Includes retry logic with exponential backoff for HTTP 429 throttling errors.
 
     Args:
         workspace_id: Log Analytics workspace ID
@@ -100,33 +220,63 @@ def _execute_logs_query(
         tenant_id: Azure tenant ID
         client_id: Azure service principal client ID
         client_secret: Azure service principal client secret
+        max_retries: Maximum number of retry attempts for throttling (default: 5)
+        initial_backoff: Initial backoff time in seconds (default: 1.0)
 
     Returns:
-        Query response object from Azure Monitor
+        Query response object from Azure Monitor (may have PARTIAL status)
 
     Raises:
-        Exception: If query fails
+        HttpResponseError: If non-retryable HTTP error occurs after all retries
 
     """
-    from azure.monitor.query import LogsQueryClient, LogsQueryStatus
+    from azure.core.exceptions import HttpResponseError
+    from azure.monitor.query import LogsQueryClient
 
     # Create authenticated client
     credential = _create_azure_credential(tenant_id, client_id, client_secret)
     client = LogsQueryClient(credential)
 
-    # Execute query
-    response = client.query_workspace(
-        workspace_id=workspace_id,
-        query=query,
-        timespan=timespan,
-        include_statistics=False,
-        include_visualization=False,
-    )
+    last_exception = None
+    for attempt in range(max_retries + 1):
+        try:
+            # Execute query
+            response = client.query_workspace(
+                workspace_id=workspace_id,
+                query=query,
+                timespan=timespan,
+                include_statistics=False,
+                include_visualization=False,
+            )
+            # Return response (may be SUCCESS or PARTIAL - caller handles status)
+            return response
 
-    if response.status != LogsQueryStatus.SUCCESS:
-        raise Exception(f"Query failed with status: {response.status}")
+        except HttpResponseError as e:
+            last_exception = e
+            # Only retry on 429 (Too Many Requests) status code
+            if e.status_code == 429 and attempt < max_retries:
+                # Use Retry-After header if present, otherwise use exponential backoff
+                retry_after = None
+                if e.response and e.response.headers:
+                    retry_after_header = e.response.headers.get("Retry-After")
+                    if retry_after_header:
+                        try:
+                            retry_after = int(retry_after_header)
+                        except (ValueError, TypeError):
+                            pass
 
-    return response
+                if retry_after is None:
+                    # Exponential backoff: 1s, 2s, 4s, 8s, 16s, ...
+                    retry_after = initial_backoff * (2**attempt)
+
+                time.sleep(retry_after)
+            else:
+                # Non-retryable error or max retries exceeded
+                raise
+
+    # Should not reach here, but raise last exception if we do
+    if last_exception:
+        raise last_exception
 
 
 def _convert_value_to_schema_type(value, spark_type):
@@ -317,6 +467,8 @@ class AzureMonitorDataSource(DataSource):
             sample_query = f"{sample_query} | take 1"
 
         # Execute sample query using module-level function
+        from azure.monitor.query import LogsQueryStatus
+
         response = _execute_logs_query(
             workspace_id=workspace_id,
             query=sample_query,
@@ -325,6 +477,10 @@ class AzureMonitorDataSource(DataSource):
             client_id=client_id,
             client_secret=client_secret,
         )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            raise Exception(f"Query failed with status: {response.status}")
 
         # Check if we got any tables
         if not response.tables or len(response.tables) == 0:
@@ -399,7 +555,7 @@ class MicrosoftSentinelDataSource(AzureMonitorDataSource):
 
 class AzureMonitorReader:
     """Base reader class for Azure Monitor / Log Analytics workspaces.
-    
+
     Shared read logic for batch and streaming reads.
     """
 
@@ -425,11 +581,18 @@ class AzureMonitorReader:
         assert self.client_id is not None, "client_id is required"
         assert self.client_secret is not None, "client_secret is required"
 
+        # Retry and subdivision options
+        self.max_retries = int(options.get("max_retries", "5"))
+        self.initial_backoff = float(options.get("initial_backoff", "1.0"))
+        self.min_partition_seconds = int(options.get("min_partition_seconds", "60"))
+
         # Store schema (provided by DataSource.schema())
         self._schema = schema
 
     def read(self, partition: TimeRangePartition):
         """Read data for the given partition time range.
+
+        Handles throttling with retries and large result sets by subdividing time ranges.
 
         Args:
             partition: TimeRangePartition containing start_time and end_time
@@ -439,12 +602,12 @@ class AzureMonitorReader:
 
         """
         # Import inside method for partition-level execution
-        from pyspark.sql import Row
+        from azure.monitor.query import LogsQueryStatus
 
         # Use partition's time range
         timespan_value = (partition.start_time, partition.end_time)
 
-        # Execute query using module-level function
+        # Execute query using module-level function (includes retry logic for 429)
         response = _execute_logs_query(
             workspace_id=self.workspace_id,
             query=self.query,
@@ -452,7 +615,76 @@ class AzureMonitorReader:
             tenant_id=self.tenant_id,
             client_id=self.client_id,
             client_secret=self.client_secret,
+            max_retries=self.max_retries,
+            initial_backoff=self.initial_backoff,
         )
+
+        # Handle PARTIAL or FAILURE status - check if due to size limits
+        # Azure may return either PARTIAL or FAILURE for size limit errors
+        if response.status in (LogsQueryStatus.PARTIAL, LogsQueryStatus.FAILURE):
+            if _is_result_size_limit_error(response):
+                # Try to subdivide the time range
+                yield from self._read_with_subdivision(partition)
+                return
+            else:
+                # Error for other reasons - raise error
+                error_msg = ""
+                if hasattr(response, "partial_error") and response.partial_error:
+                    error_msg = f": {response.partial_error}"
+                raise Exception(f"Query failed with status {response.status}{error_msg}")
+
+        # Process successful response
+        yield from self._process_response(response)
+
+    def _read_with_subdivision(self, partition: TimeRangePartition):
+        """Subdivide a partition and recursively read smaller time ranges.
+
+        Args:
+            partition: TimeRangePartition that returned too many results
+
+        Yields:
+            Row objects from subdivided queries
+
+        Raises:
+            Exception: If partition cannot be subdivided further
+
+        """
+        from datetime import timedelta
+
+        # Calculate partition duration in seconds
+        duration = (partition.end_time - partition.start_time).total_seconds()
+
+        # Check if we can subdivide further
+        if duration <= self.min_partition_seconds:
+            raise Exception(
+                f"Cannot subdivide partition further. "
+                f"Duration {duration}s is at or below minimum {self.min_partition_seconds}s. "
+                f"Time range: {partition.start_time} to {partition.end_time}. "
+                f"Consider using a more selective query or increasing min_partition_seconds."
+            )
+
+        # Split the time range in half
+        midpoint = partition.start_time + timedelta(seconds=duration / 2)
+
+        # Create two sub-partitions
+        first_half = TimeRangePartition(partition.start_time, midpoint)
+        second_half = TimeRangePartition(midpoint, partition.end_time)
+
+        # Recursively read from each sub-partition
+        yield from self.read(first_half)
+        yield from self.read(second_half)
+
+    def _process_response(self, response):
+        """Process a successful query response and yield rows.
+
+        Args:
+            response: Successful LogsQueryResult
+
+        Yields:
+            Row objects converted according to schema
+
+        """
+        from pyspark.sql import Row
 
         # Create a mapping of column names to their expected types from schema
         schema_field_map = {field.name: field.dataType for field in self._schema.fields}
@@ -500,7 +732,7 @@ class AzureMonitorBatchReader(AzureMonitorReader, DataSourceReader):
 
         """
         super().__init__(options, schema)
-        
+
         # Time range options (mutually exclusive)
         timespan = options.get("timespan")
         start_time = options.get("start_time")
@@ -598,7 +830,7 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
         """
         super().__init__(options, schema)
-        
+
         # Stream-specific options
         start_time = options.get("start_time", "latest")
         # Support 'latest' as alias for current timestamp

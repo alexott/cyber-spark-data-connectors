@@ -439,14 +439,22 @@ class TestAzureMonitorStreamReader:
     @patch("azure.monitor.query.LogsQueryClient")
     @patch("azure.identity.ClientSecretCredential")
     def test_read_query_failure(self, mock_credential, mock_client, stream_options, basic_schema):
-        """Test handling of query failure in streaming."""
+        """Test handling of query failure (PARTIAL status for non-size-limit reasons) in streaming."""
         from azure.monitor.query import LogsQueryStatus
 
         from cyber_connectors.MsSentinel import TimeRangePartition
 
-        # Create mock response with failure status
+        # Create mock response with PARTIAL status (non-size-limit error)
         mock_response = Mock()
         mock_response.status = LogsQueryStatus.PARTIAL
+        # Use a dict for partial_error to avoid Mock auto-creation issues
+        mock_response.partial_error = {
+            "code": "SomeOtherError",
+            "message": "Query timeout occurred",
+            "details": None,
+            "innererror": None,
+        }
+        mock_response.tables = []
 
         mock_client_instance = Mock()
         mock_client_instance.query_workspace.return_value = mock_response
