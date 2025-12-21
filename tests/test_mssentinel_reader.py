@@ -1745,3 +1745,237 @@ class TestTimeRangeSubdivision:
         assert reader.max_retries == 10
         assert reader.initial_backoff == 2.5
         assert reader.min_partition_seconds == 120
+
+
+class TestAzureCloudConfiguration:
+    """Test azure_cloud configuration for sovereign clouds (GovCloud, China, etc.)."""
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    def test_get_azure_cloud_config_public(self):
+        """Test _get_azure_cloud_config returns None for public cloud (defaults)."""
+        from cyber_connectors.MsSentinel import _get_azure_cloud_config
+
+        authority, endpoint = _get_azure_cloud_config("public")
+        assert authority is None
+        assert endpoint is None
+
+    def test_get_azure_cloud_config_government(self):
+        """Test _get_azure_cloud_config returns correct values for government cloud."""
+        from azure.identity import AzureAuthorityHosts
+
+        from cyber_connectors.MsSentinel import _get_azure_cloud_config
+
+        authority, endpoint = _get_azure_cloud_config("government")
+        assert authority == AzureAuthorityHosts.AZURE_GOVERNMENT
+        assert endpoint == "https://api.loganalytics.us"
+
+    def test_get_azure_cloud_config_china(self):
+        """Test _get_azure_cloud_config returns correct values for china cloud."""
+        from azure.identity import AzureAuthorityHosts
+
+        from cyber_connectors.MsSentinel import _get_azure_cloud_config
+
+        authority, endpoint = _get_azure_cloud_config("china")
+        assert authority == AzureAuthorityHosts.AZURE_CHINA
+        assert endpoint == "https://api.loganalytics.azure.cn"
+
+    def test_get_azure_cloud_config_default_is_public(self):
+        """Test _get_azure_cloud_config defaults to public when None."""
+        from cyber_connectors.MsSentinel import _get_azure_cloud_config
+
+        authority, endpoint = _get_azure_cloud_config(None)
+        assert authority is None
+        assert endpoint is None
+
+    def test_get_azure_cloud_config_invalid_raises_error(self):
+        """Test _get_azure_cloud_config raises ValueError for invalid cloud."""
+        from cyber_connectors.MsSentinel import _get_azure_cloud_config
+
+        with pytest.raises(ValueError, match="Invalid azure_cloud value"):
+            _get_azure_cloud_config("invalid")
+
+    def test_reader_azure_cloud_default_is_public(self, basic_schema):
+        """Test that azure_cloud is 'public' by default."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        assert reader.azure_cloud == "public"
+
+    def test_reader_azure_cloud_custom(self, basic_schema):
+        """Test that custom azure_cloud is set correctly."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "azure_cloud": "government",
+        }
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        assert reader.azure_cloud == "government"
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_government_cloud_configures_authority_and_endpoint(self, mock_credential, mock_client):
+        """Test that government cloud configures both authority and endpoint."""
+        from azure.identity import AzureAuthorityHosts
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        # Call with government cloud
+        _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            tenant_id="test",
+            client_id="test",
+            client_secret="test",
+            azure_cloud="government",
+        )
+
+        # Verify ClientSecretCredential was called with authority
+        mock_credential.assert_called_once()
+        cred_kwargs = mock_credential.call_args[1]
+        assert cred_kwargs["authority"] == AzureAuthorityHosts.AZURE_GOVERNMENT
+
+        # Verify LogsQueryClient was called with endpoint
+        mock_client.assert_called_once()
+        client_kwargs = mock_client.call_args[1]
+        assert client_kwargs["endpoint"] == "https://api.loganalytics.us"
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_china_cloud_configures_authority_and_endpoint(self, mock_credential, mock_client):
+        """Test that china cloud configures both authority and endpoint."""
+        from azure.identity import AzureAuthorityHosts
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        # Call with china cloud
+        _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            tenant_id="test",
+            client_id="test",
+            client_secret="test",
+            azure_cloud="china",
+        )
+
+        # Verify ClientSecretCredential was called with authority
+        mock_credential.assert_called_once()
+        cred_kwargs = mock_credential.call_args[1]
+        assert cred_kwargs["authority"] == AzureAuthorityHosts.AZURE_CHINA
+
+        # Verify LogsQueryClient was called with endpoint
+        mock_client.assert_called_once()
+        client_kwargs = mock_client.call_args[1]
+        assert client_kwargs["endpoint"] == "https://api.loganalytics.azure.cn"
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_public_cloud_uses_defaults(self, mock_credential, mock_client):
+        """Test that public cloud uses defaults (no authority, no endpoint)."""
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        # Call with public cloud (default)
+        _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            tenant_id="test",
+            client_id="test",
+            client_secret="test",
+            azure_cloud="public",
+        )
+
+        # Verify ClientSecretCredential was called without authority
+        mock_credential.assert_called_once()
+        cred_kwargs = mock_credential.call_args[1]
+        assert "authority" not in cred_kwargs
+
+        # Verify LogsQueryClient was called without endpoint
+        mock_client.assert_called_once()
+        _, client_kwargs = mock_client.call_args
+        assert "endpoint" not in client_kwargs
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_read_with_government_cloud(self, mock_credential, mock_client, basic_schema):
+        """Test that read() uses azure_cloud for government configuration."""
+        from azure.identity import AzureAuthorityHosts
+        from azure.monitor.query import LogsQueryStatus
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+            "azure_cloud": "government",
+        }
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["value1"]]
+        mock_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        partitions = reader.partitions()
+        list(reader.read(partitions[0]))
+
+        # Verify authority was passed to credential
+        cred_kwargs = mock_credential.call_args[1]
+        assert cred_kwargs["authority"] == AzureAuthorityHosts.AZURE_GOVERNMENT
+
+        # Verify endpoint was passed to client
+        client_kwargs = mock_client.call_args[1]
+        assert client_kwargs["endpoint"] == "https://api.loganalytics.us"

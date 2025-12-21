@@ -17,13 +17,57 @@ from pyspark.sql.types import StructType
 from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage
 
 
-def _create_azure_credential(tenant_id, client_id, client_secret):
+def _get_azure_cloud_config(azure_cloud=None):
+    """Get Azure cloud configuration for authority and Log Analytics endpoint.
+
+    Maps the azure_cloud option to the appropriate authority host for authentication
+    and Log Analytics API endpoint.
+
+    Args:
+        azure_cloud: Cloud environment - "public" (default), "government", or "china"
+
+    Returns:
+        tuple: (authority, logs_endpoint) where:
+            - authority: Authority host URL for authentication (None for public cloud default)
+            - logs_endpoint: Log Analytics API endpoint URL (None for public cloud default)
+
+    Raises:
+        ValueError: If azure_cloud value is not recognized
+
+    """
+    from azure.identity import AzureAuthorityHosts
+
+    # Normalize input
+    cloud = (azure_cloud or "public").lower().strip()
+
+    cloud_configs = {
+        "public": (None, None),  # Use defaults
+        "government": (
+            AzureAuthorityHosts.AZURE_GOVERNMENT,  # login.microsoftonline.us
+            "https://api.loganalytics.us",
+        ),
+        "china": (
+            AzureAuthorityHosts.AZURE_CHINA,  # login.chinacloudapi.cn
+            "https://api.loganalytics.azure.cn",
+        ),
+    }
+
+    if cloud not in cloud_configs:
+        valid_clouds = ", ".join(cloud_configs.keys())
+        raise ValueError(f"Invalid azure_cloud value '{azure_cloud}'. Valid values are: {valid_clouds}")
+
+    return cloud_configs[cloud]
+
+
+def _create_azure_credential(tenant_id, client_id, client_secret, authority=None):
     """Create Azure ClientSecretCredential for authentication.
 
     Args:
         tenant_id: Azure tenant ID
         client_id: Azure service principal client ID
         client_secret: Azure service principal client secret
+        authority: Optional authority host URL for sovereign clouds
+                   (e.g., AzureAuthorityHosts.AZURE_GOVERNMENT)
 
     Returns:
         ClientSecretCredential: Authenticated credential object
@@ -31,6 +75,10 @@ def _create_azure_credential(tenant_id, client_id, client_secret):
     """
     from azure.identity import ClientSecretCredential
 
+    if authority:
+        return ClientSecretCredential(
+            tenant_id=tenant_id, client_id=client_id, client_secret=client_secret, authority=authority
+        )
     return ClientSecretCredential(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
 
 
@@ -208,6 +256,7 @@ def _execute_logs_query(
     client_secret,
     max_retries=5,
     initial_backoff=1.0,
+    azure_cloud=None,
 ):
     """Execute a KQL query against Azure Monitor Log Analytics workspace.
 
@@ -222,6 +271,7 @@ def _execute_logs_query(
         client_secret: Azure service principal client secret
         max_retries: Maximum number of retry attempts for throttling (default: 5)
         initial_backoff: Initial backoff time in seconds (default: 1.0)
+        azure_cloud: Azure cloud environment - "public" (default), "government", or "china"
 
     Returns:
         Query response object from Azure Monitor (may have PARTIAL status)
@@ -233,9 +283,17 @@ def _execute_logs_query(
     from azure.core.exceptions import HttpResponseError
     from azure.monitor.query import LogsQueryClient
 
-    # Create authenticated client
-    credential = _create_azure_credential(tenant_id, client_id, client_secret)
-    client = LogsQueryClient(credential)
+    # Get cloud-specific configuration (authority and endpoint)
+    authority, endpoint = _get_azure_cloud_config(azure_cloud)
+
+    # Create authenticated client with cloud-specific authority
+    credential = _create_azure_credential(tenant_id, client_id, client_secret, authority=authority)
+
+    # Create LogsQueryClient with cloud-specific endpoint
+    if endpoint:
+        client = LogsQueryClient(credential, endpoint=endpoint)
+    else:
+        client = LogsQueryClient(credential)
 
     last_exception = None
     for attempt in range(max_retries + 1):
@@ -398,6 +456,11 @@ class AzureMonitorDataSource(DataSource):
     - tenant_id: Azure tenant ID
     - client_id: Azure service principal ID
     - client_secret: Azure service principal client secret
+    - azure_cloud: Azure cloud environment - "public" (default), "government", or "china".
+                   Automatically configures authentication authority and Log Analytics endpoint.
+    - max_retries: Maximum retry attempts for throttling (default: 5)
+    - initial_backoff: Initial backoff time in seconds for retries (default: 1.0)
+    - min_partition_seconds: Minimum partition duration for subdivision (default: 60)
     """
 
     @classmethod
@@ -450,6 +513,7 @@ class AzureMonitorDataSource(DataSource):
         timespan = self.options.get("timespan")
         start_time = self.options.get("start_time")
         end_time = self.options.get("end_time")
+        azure_cloud = self.options.get("azure_cloud", "public")
 
         # Validate required options
         assert workspace_id is not None, "workspace_id is required"
@@ -476,6 +540,7 @@ class AzureMonitorDataSource(DataSource):
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret,
+            azure_cloud=azure_cloud,
         )
 
         # Check query status
@@ -581,6 +646,9 @@ class AzureMonitorReader:
         assert self.client_id is not None, "client_id is required"
         assert self.client_secret is not None, "client_secret is required"
 
+        # Azure cloud environment: "public" (default), "government", or "china"
+        self.azure_cloud = options.get("azure_cloud", "public")
+
         # Retry and subdivision options
         self.max_retries = int(options.get("max_retries", "5"))
         self.initial_backoff = float(options.get("initial_backoff", "1.0"))
@@ -617,6 +685,7 @@ class AzureMonitorReader:
             client_secret=self.client_secret,
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
+            azure_cloud=self.azure_cloud,
         )
 
         # Handle PARTIAL or FAILURE status - check if due to size limits

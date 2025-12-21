@@ -222,8 +222,15 @@ Supported read options:
 - `tenant_id` (string, required) - Azure Tenant ID
 - `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
 - `client_secret` (string, required) - Client Secret of Azure Service Principal
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment. Valid values:
+  - `"public"` - Azure Public Cloud (default)
+  - `"government"` - Azure Government (GovCloud)
+  - `"china"` - Azure China (21Vianet)
 - `num_partitions` (int, optional, default: 1) - Number of partitions for reading data
 - `inferSchema` (bool, optional, default: true) - if we do the schema inference by sampling result.
+- `max_retries` (int, optional, default: 5) - Maximum retry attempts for HTTP 429 throttling errors
+- `initial_backoff` (float, optional, default: 1.0) - Initial backoff time in seconds for retries (uses exponential backoff)
+- `min_partition_seconds` (int, optional, default: 60) - Minimum partition duration in seconds when subdividing large result sets
 
 **KQL Query Examples:**
 
@@ -237,6 +244,37 @@ query = "SecurityAlert | where TimeGenerated > ago(7d) | project TimeGenerated, 
 # Custom table query
 query = "MyCustomTable_CL | where TimeGenerated > ago(1h)"
 ```
+
+**Azure Sovereign Clouds:**
+
+For Azure Government or Azure China environments, use the `azure_cloud` option:
+
+```python
+# Azure Government (GovCloud)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "SecurityEvent | take 100",
+    "timespan": "P1D",
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+    "azure_cloud": "government",  # Uses login.microsoftonline.us and api.loganalytics.us
+}
+
+# Azure China (21Vianet)
+read_options = {
+    # ... other options ...
+    "azure_cloud": "china",  # Uses login.chinacloudapi.cn and api.loganalytics.azure.cn
+}
+```
+
+**Automatic Throttling and Large Result Set Handling:**
+
+The connector automatically handles common Azure Monitor query issues:
+
+- **Throttling (HTTP 429)**: When Azure Monitor returns rate limit errors, the connector automatically retries with exponential backoff. Configure with `max_retries` and `initial_backoff` options.
+
+- **Large Result Sets**: When a query exceeds Azure's [result size limits](https://learn.microsoft.com/en-us/azure/azure-monitor/service-limits#query-api) (500,000 records or ~64MB), the connector automatically subdivides the time range into smaller chunks and queries each separately. Configure the minimum subdivision size with `min_partition_seconds`.
 
 #### Streaming Read
 
