@@ -622,13 +622,22 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         self.partition_duration = int(options.get("partition_duration", "3600"))
 
     def initialOffset(self):
-        """Return the initial offset (start time).
+        """Return the initial offset (start time minus 1 microsecond).
+
+        The offset is adjusted by -1 microsecond to compensate for the +1 microsecond
+        added in partitions() method. This prevents overlap between consecutive batches.
 
         Returns:
-            JSON string representation of AzureMonitorOffset with the configured start time
+            JSON string representation of AzureMonitorOffset with the adjusted start time
 
         """
-        return AzureMonitorOffset(self.start_time).json()
+        from datetime import datetime, timedelta
+
+        # Parse the start time and subtract 1 microsecond
+        # This compensates for the +1µs added in partitions() to prevent batch overlap
+        start_dt = datetime.fromisoformat(self.start_time.replace("Z", "+00:00"))
+        adjusted_start = start_dt - timedelta(microseconds=1)
+        return AzureMonitorOffset(adjusted_start.isoformat()).json()
 
     def latestOffset(self):
         """Return the latest offset (current time).
@@ -664,6 +673,12 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         # Parse timestamps
         start_time = datetime.fromisoformat(start_offset.timestamp.replace("Z", "+00:00"))
         end_time = datetime.fromisoformat(end_offset.timestamp.replace("Z", "+00:00"))
+
+        # Add 1 microsecond to start to prevent overlap with previous batch's end
+        # This works with the -1µs adjustment in initialOffset() to ensure:
+        # - Initial batch: (start - 1µs) + 1µs = start (correct original start)
+        # - Subsequent batches: previous_end + 1µs (no overlap with previous batch)
+        start_time = start_time + timedelta(microseconds=1)
 
         # Calculate total duration
         total_duration = (end_time - start_time).total_seconds()

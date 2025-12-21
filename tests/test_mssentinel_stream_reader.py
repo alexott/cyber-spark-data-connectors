@@ -222,7 +222,11 @@ class TestAzureMonitorStreamReader:
             AzureMonitorStreamReader(options, basic_schema)
 
     def test_initial_offset(self, stream_options, basic_schema):
-        """Test initial offset returns start_time as JSON string."""
+        """Test initial offset returns start_time minus 1 microsecond as JSON string.
+
+        The offset is adjusted by -1 microsecond to compensate for the +1 microsecond
+        added in partitions() method, preventing overlap between consecutive batches.
+        """
         reader = AzureMonitorStreamReader(stream_options, basic_schema)
         offset_json = reader.initialOffset()
 
@@ -230,9 +234,9 @@ class TestAzureMonitorStreamReader:
         assert isinstance(offset_json, str)
         assert "timestamp" in offset_json
 
-        # Deserialize and verify
+        # Deserialize and verify - should be 1 microsecond before start_time
         offset = AzureMonitorOffset.from_json(offset_json)
-        assert offset.timestamp == "2024-01-01T00:00:00Z"
+        assert offset.timestamp == "2023-12-31T23:59:59.999999+00:00"
 
     def test_latest_offset(self, stream_options, basic_schema):
         """Test latest offset returns current time as JSON string."""
@@ -255,7 +259,11 @@ class TestAzureMonitorStreamReader:
         assert time_diff < 60  # Less than 1 minute difference
 
     def test_partitions_single_partition(self, stream_options, basic_schema):
-        """Test partitions with time range smaller than partition_duration."""
+        """Test partitions with time range smaller than partition_duration.
+
+        Note: partitions() adds 1 microsecond to start_time to prevent overlap with
+        previous batch's end time.
+        """
         reader = AzureMonitorStreamReader(stream_options, basic_schema)
 
         start_offset = AzureMonitorOffset("2024-01-01T00:00:00Z").json()
@@ -264,12 +272,18 @@ class TestAzureMonitorStreamReader:
         partitions = reader.partitions(start_offset, end_offset)
 
         # Should have single partition
+        # Start time is adjusted by +1 microsecond to prevent batch overlap
         assert len(partitions) == 1
-        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00+00:00"
+        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00.000001+00:00"
         assert partitions[0].end_time.isoformat() == "2024-01-01T00:30:00+00:00"
 
     def test_partitions_multiple_partitions(self, stream_options, basic_schema):
-        """Test partitions splits time range into multiple partitions."""
+        """Test partitions splits time range into multiple partitions.
+
+        Note: partitions() adds 1 microsecond to start_time to prevent overlap with
+        previous batch's end time. Within the same batch, each partition also starts
+        1 microsecond after the previous partition ends.
+        """
         reader = AzureMonitorStreamReader(stream_options, basic_schema)
 
         start_offset = AzureMonitorOffset("2024-01-01T00:00:00Z").json()
@@ -281,22 +295,26 @@ class TestAzureMonitorStreamReader:
         assert len(partitions) == 3
 
         # Verify partition time ranges
-        # First partition: exact start and end at 1-hour boundary
-        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00+00:00"
-        assert partitions[0].end_time.isoformat() == "2024-01-01T01:00:00+00:00"
+        # First partition: start adjusted by +1 microsecond (to prevent batch overlap)
+        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00.000001+00:00"
+        assert partitions[0].end_time.isoformat() == "2024-01-01T01:00:00.000001+00:00"
 
-        # Second partition: starts 1 microsecond after first ends (to avoid overlap)
+        # Second partition: starts 1 microsecond after first ends (to avoid overlap within batch)
         # End time = start_time + 1 hour
-        assert partitions[1].start_time.isoformat() == "2024-01-01T01:00:00.000001+00:00"
-        assert partitions[1].end_time.isoformat() == "2024-01-01T02:00:00.000001+00:00"
+        assert partitions[1].start_time.isoformat() == "2024-01-01T01:00:00.000002+00:00"
+        assert partitions[1].end_time.isoformat() == "2024-01-01T02:00:00.000002+00:00"
 
         # Third partition: starts 1 microsecond after second ends
         # End time = min(start_time + 1 hour, end_offset) = end_offset
-        assert partitions[2].start_time.isoformat() == "2024-01-01T02:00:00.000002+00:00"
+        assert partitions[2].start_time.isoformat() == "2024-01-01T02:00:00.000003+00:00"
         assert partitions[2].end_time.isoformat() == "2024-01-01T03:00:00+00:00"
 
     def test_partitions_custom_duration(self, stream_options, basic_schema):
-        """Test partitions with custom partition_duration."""
+        """Test partitions with custom partition_duration.
+
+        Note: partitions() adds 1 microsecond to start_time to prevent overlap with
+        previous batch's end time.
+        """
         stream_options["partition_duration"] = "1800"  # 30 minutes
         reader = AzureMonitorStreamReader(stream_options, basic_schema)
 
@@ -308,15 +326,20 @@ class TestAzureMonitorStreamReader:
         # Should have 2 partitions (30 minutes each)
         assert len(partitions) == 2
 
-        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00+00:00"
-        assert partitions[0].end_time.isoformat() == "2024-01-01T00:30:00+00:00"
+        # First partition: start adjusted by +1 microsecond (to prevent batch overlap)
+        assert partitions[0].start_time.isoformat() == "2024-01-01T00:00:00.000001+00:00"
+        assert partitions[0].end_time.isoformat() == "2024-01-01T00:30:00.000001+00:00"
 
-        # Second partition starts 1 microsecond after first ends (to avoid overlap)
-        assert partitions[1].start_time.isoformat() == "2024-01-01T00:30:00.000001+00:00"
+        # Second partition starts 1 microsecond after first ends (to avoid overlap within batch)
+        assert partitions[1].start_time.isoformat() == "2024-01-01T00:30:00.000002+00:00"
         assert partitions[1].end_time.isoformat() == "2024-01-01T01:00:00+00:00"
 
     def test_partitions_partial_last_partition(self, stream_options, basic_schema):
-        """Test partitions handles partial last partition correctly."""
+        """Test partitions handles partial last partition correctly.
+
+        Note: partitions() adds 1 microsecond to start_time to prevent overlap with
+        previous batch's end time.
+        """
         reader = AzureMonitorStreamReader(stream_options, basic_schema)
 
         start_offset = AzureMonitorOffset("2024-01-01T00:00:00Z").json()
@@ -327,10 +350,10 @@ class TestAzureMonitorStreamReader:
         # Should have 3 partitions: 1h, 1h, 0.5h
         assert len(partitions) == 3
 
-        # First partition ends at 1-hour boundary
-        assert partitions[0].end_time.isoformat() == "2024-01-01T01:00:00+00:00"
-        # Second partition ends at 2-hour boundary + 1 microsecond (starts 1 microsecond after first)
-        assert partitions[1].end_time.isoformat() == "2024-01-01T02:00:00.000001+00:00"
+        # First partition: start adjusted by +1 microsecond, end = start + 1 hour
+        assert partitions[0].end_time.isoformat() == "2024-01-01T01:00:00.000001+00:00"
+        # Second partition ends at 2-hour boundary + 2 microseconds (starts 1 microsecond after first)
+        assert partitions[1].end_time.isoformat() == "2024-01-01T02:00:00.000002+00:00"
         # Third partition (partial, starts 1 microsecond after second) ends at 2.5 hours (end_offset)
         assert partitions[2].end_time.isoformat() == "2024-01-01T02:30:00+00:00"
 
