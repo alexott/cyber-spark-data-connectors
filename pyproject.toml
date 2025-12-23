@@ -2,7 +2,7 @@
 # https://stackoverflow.com/questions/60971502/python-poetry-how-to-install-optional-dependencies
 [tool.poetry]
 name = "cyber-spark-data-connectors"
-version = "0.0.5"
+version = "0.0.6"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 authors = ["Alex Ott <alexott@gmail.com>"]
 packages = [
