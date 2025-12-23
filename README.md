@@ -85,9 +85,15 @@ This data source supports both reading from and writing to [Microsoft Sentinel](
 
 ### Authentication Requirements
 
-This connector uses Azure Service Principal Client ID/Secret for authentication.
+This connector supports three authentication methods (in order of precedence):
 
-The service principal needs the following permissions:
+1. **Databricks Unity Catalog Service Credential** (`databricks_credential`): Use a named service credential configured in Unity Catalog. This is the recommended approach when running on Databricks with Unity Catalog enabled. See [Unity Catalog Service Credentials documentation](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/use-service-credentials).
+
+2. **Azure DefaultAzureCredential** (`azure_default_credential`): Use Azure's DefaultAzureCredential, which automatically discovers credentials from the environment (managed identity, environment variables, etc.). This is useful when running on compute with attached service credentials or managed identity.
+
+3. **Azure Service Principal** (`tenant_id`, `client_id`, `client_secret`): Use explicit service principal credentials. This is the traditional approach and requires all three parameters.
+
+The service principal (or managed identity) needs the following permissions:
 - For reading: **Log Analytics Reader** role on the Log Analytics workspace
 - For writing: **Monitoring Metrics Publisher** role on the DCE and DCR
 
@@ -152,9 +158,11 @@ Supported write options:
 - `dce` (string, required) - URL of the Data Collection Endpoint.
 - `dcr_id` (string, required) - ID of Data Collection Rule.
 - `dcs` (string, required) - name of custom table created in the Log Analytics Workspace.
-- `tenant_id` (string, required) - Azure Tenant ID.
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal.
-- `client_secret` (string, required) - Client Secret of Azure Service Principal.
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment ("public", "government", or "china")
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
 
 ### Reading from Microsoft Sentinel / Azure Monitor
@@ -219,9 +227,10 @@ Supported read options:
   - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
   - `end_time` (string, optional) - End time in ISO 8601 format. Only valid when `start_time` is specified
   - **Note**: `timespan` and `start_time/end_time` are mutually exclusive - choose one approach
-- `tenant_id` (string, required) - Azure Tenant ID
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
-- `client_secret` (string, required) - Client Secret of Azure Service Principal
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
 - `azure_cloud` (string, optional, default: "public") - Azure cloud environment. Valid values:
   - `"public"` - Azure Public Cloud (default)
   - `"government"` - Azure Government (GovCloud)
@@ -243,6 +252,40 @@ query = "SecurityAlert | where TimeGenerated > ago(7d) | project TimeGenerated, 
 
 # Custom table query
 query = "MyCustomTable_CL | where TimeGenerated > ago(1h)"
+```
+
+**Authentication Examples:**
+
+Using Unity Catalog Service Credential (recommended for Databricks):
+
+```python
+# Using a named service credential from Unity Catalog
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "timespan": "P1D",
+    "databricks_credential": "my-azure-credential",  # Name of UC service credential
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
+```
+
+Using Azure DefaultAzureCredential (for managed identity or attached credentials):
+
+```python
+# Uses the default credential chain (managed identity, environment, etc.)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "timespan": "P1D",
+    "azure_default_credential": "true",
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
 ```
 
 **Azure Sovereign Clouds:**
@@ -319,9 +362,11 @@ Supported streaming read options:
 - `query` (string, required) - KQL query to execute (should not include time filters - these are added automatically)
 - `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from current time
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
-- `tenant_id` (string, required) - Azure Tenant ID
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
-- `client_secret` (string, required) - Client Secret of Azure Service Principal
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment ("public", "government", or "china")
 - `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints
 
 **Important notes for streaming:**

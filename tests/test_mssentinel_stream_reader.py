@@ -182,34 +182,20 @@ class TestAzureMonitorStreamReader:
         with pytest.raises(AssertionError, match="query is required"):
             AzureMonitorStreamReader(options, basic_schema)
 
-    def test_stream_reader_missing_tenant_id(self, basic_schema):
-        """Test stream reader fails without tenant_id."""
+    def test_stream_reader_missing_authentication(self, basic_schema):
+        """Test stream reader fails without any authentication method."""
         options = {
             "workspace_id": "test-workspace-id",
             "query": "AzureActivity",
             "start_time": "2024-01-01T00:00:00Z",
-            "client_id": "test-client",
-            "client_secret": "test-secret",
         }
 
-        with pytest.raises(AssertionError, match="tenant_id is required"):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorStreamReader(options, basic_schema)
 
-    def test_stream_reader_missing_client_id(self, basic_schema):
-        """Test stream reader fails without client_id."""
-        options = {
-            "workspace_id": "test-workspace-id",
-            "query": "AzureActivity",
-            "start_time": "2024-01-01T00:00:00Z",
-            "tenant_id": "test-tenant",
-            "client_secret": "test-secret",
-        }
-
-        with pytest.raises(AssertionError, match="client_id is required"):
-            AzureMonitorStreamReader(options, basic_schema)
-
-    def test_stream_reader_missing_client_secret(self, basic_schema):
-        """Test stream reader fails without client_secret."""
+    def test_stream_reader_partial_sp_credentials_fails(self, basic_schema):
+        """Test stream reader fails with partial SP credentials."""
+        # Only tenant_id and client_id provided
         options = {
             "workspace_id": "test-workspace-id",
             "query": "AzureActivity",
@@ -218,8 +204,34 @@ class TestAzureMonitorStreamReader:
             "client_id": "test-client",
         }
 
-        with pytest.raises(AssertionError, match="client_secret is required"):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorStreamReader(options, basic_schema)
+
+    def test_stream_reader_with_databricks_credential(self, basic_schema):
+        """Test stream reader with databricks_credential authentication."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "2024-01-01T00:00:00Z",
+            "databricks_credential": "my-azure-credential",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        assert reader.databricks_credential == "my-azure-credential"
+        assert reader.azure_default_credential is False
+
+    def test_stream_reader_with_azure_default_credential(self, basic_schema):
+        """Test stream reader with azure_default_credential authentication."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "2024-01-01T00:00:00Z",
+            "azure_default_credential": "true",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        assert reader.databricks_credential is None
+        assert reader.azure_default_credential is True
 
     def test_initial_offset(self, stream_options, basic_schema):
         """Test initial offset returns start_time minus 1 microsecond as JSON string.
