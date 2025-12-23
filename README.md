@@ -213,7 +213,7 @@ df.show()
 Supported read options:
 
 - `workspace_id` (string, required) - Log Analytics workspace ID
-- `query` (string, required) - KQL query to execute
+- `query` (string, required) - KQL query to execute (could be just a table name)
 - **Time range options (choose one approach):**
   - `timespan` (string) - Time range in ISO 8601 duration format (e.g., "P1D" = 1 day, "PT1H" = 1 hour, "P7D" = 7 days)
   - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
@@ -316,7 +316,7 @@ query.awaitTermination()
 Supported streaming read options:
 
 - `workspace_id` (string, required) - Log Analytics workspace ID
-- `query` (string, required) - KQL query to execute (should not include time filters - these are added automatically)
+- `query` (string, required) - KQL query to execute (could be just a table name). Note: *it should not include time filters - these are added automatically!*
 - `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from current time
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
 - `tenant_id` (string, required) - Azure Tenant ID

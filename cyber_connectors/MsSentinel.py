@@ -264,7 +264,7 @@ def _execute_logs_query(
 
     Args:
         workspace_id: Log Analytics workspace ID
-        query: KQL query to execute
+        query: KQL query to execute (could be just a table name)
         timespan: Time range as tuple (start_time, end_time)
         tenant_id: Azure tenant ID
         client_id: Azure service principal client ID
@@ -451,7 +451,7 @@ class AzureMonitorDataSource(DataSource):
 
     Read options:
     - workspace_id: Log Analytics workspace ID
-    - query: KQL query to execute
+    - query: KQL query to execute (could be just a table name)
     - timespan: Time range for query in ISO 8601 duration format
     - tenant_id: Azure tenant ID
     - client_id: Azure service principal ID
