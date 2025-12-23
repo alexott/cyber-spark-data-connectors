@@ -6,18 +6,19 @@
 Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).
 
 - [Custom data sources/sinks for Cybersecurity-related work](#custom-data-sourcessinks-for-cybersecurity-related-work)
-- [Available data sources](#available-data-sources)
+- [Available data sourcesa](#available-data-sourcesa)
   - [Splunk data source](#splunk-data-source)
   - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
     - [Authentication Requirements](#authentication-requirements)
     - [Writing to Microsoft Sentinel / Azure Monitor](#writing-to-microsoft-sentinel--azure-monitor)
     - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
+      - [Batch Read](#batch-read)
+      - [Streaming Read](#streaming-read)
   - [Simple REST API](#simple-rest-api)
-- [Building](#building)
-- [References](#references)
+  - [Building](#building)
+  - [References](#references)
 
-
-# Available data sources
+# Available data sourcesa
 
 > [!NOTE]
 > Most of these data sources/sinks are designed to work with relatively small amounts of data - alerts, etc.  If you need to read or write huge amounts of data, use native export/import functionality of corresponding external system.
@@ -88,9 +89,19 @@ This data source supports both reading from and writing to [Microsoft Sentinel](
 This connector uses Azure Service Principal Client ID/Secret for authentication.
 
 The service principal needs the following permissions:
+
 - For reading: **Log Analytics Reader** role on the Log Analytics workspace
 - For writing: **Monitoring Metrics Publisher** role on the DCE and DCR
 
+Authentication options:
+
+- `tenant_id` (string, required) - Azure Tenant ID
+- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
+- `client_secret` (string, required) - Client Secret of Azure Service Principal
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment. Valid values:
+  - `"public"` - Azure Public Cloud (default)
+  - `"government"` - Azure Government (GovCloud)
+  - `"china"` - Azure China (21Vianet)
 
 ### Writing to Microsoft Sentinel / Azure Monitor
 
@@ -142,6 +153,7 @@ sentinel_stream_options = {
     "client_secret": client_secret,
     "checkpointLocation": "/tmp/sentinel-checkpoint/"
 }
+
 stream = sdf.writeStream.format("ms-sentinel") \
   .trigger(availableNow=True) \
   .options(**sentinel_stream_options).start()
@@ -152,9 +164,6 @@ Supported write options:
 - `dce` (string, required) - URL of the Data Collection Endpoint.
 - `dcr_id` (string, required) - ID of Data Collection Rule.
 - `dcs` (string, required) - name of custom table created in the Log Analytics Workspace.
-- `tenant_id` (string, required) - Azure Tenant ID.
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal.
-- `client_secret` (string, required) - Client Secret of Azure Service Principal.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
 
 ### Reading from Microsoft Sentinel / Azure Monitor
@@ -219,13 +228,6 @@ Supported read options:
   - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
   - `end_time` (string, optional) - End time in ISO 8601 format. Only valid when `start_time` is specified
   - **Note**: `timespan` and `start_time/end_time` are mutually exclusive - choose one approach
-- `tenant_id` (string, required) - Azure Tenant ID
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
-- `client_secret` (string, required) - Client Secret of Azure Service Principal
-- `azure_cloud` (string, optional, default: "public") - Azure cloud environment. Valid values:
-  - `"public"` - Azure Public Cloud (default)
-  - `"government"` - Azure Government (GovCloud)
-  - `"china"` - Azure China (21Vianet)
 - `num_partitions` (int, optional, default: 1) - Number of partitions for reading data
 - `inferSchema` (bool, optional, default: true) - if we do the schema inference by sampling result.
 - `max_retries` (int, optional, default: 5) - Maximum retry attempts for HTTP 429 throttling errors
@@ -317,14 +319,11 @@ Supported streaming read options:
 
 - `workspace_id` (string, required) - Log Analytics workspace ID
 - `query` (string, required) - KQL query to execute (could be just a table name). Note: *it should not include time filters - these are added automatically!*
-- `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from current time
+- `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from the current time
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
-- `tenant_id` (string, required) - Azure Tenant ID
-- `client_id` (string, required) - Application ID (client ID) of Azure Service Principal
-- `client_secret` (string, required) - Client Secret of Azure Service Principal
-- `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints
 
 **Important notes for streaming:**
+
 - The reader automatically tracks the timestamp of the last processed data in checkpoints
 - Time ranges are split into partitions based on `partition_duration` for parallel processing
 - The query should NOT include time filters (e.g., `where TimeGenerated > ago(1d)`) - the reader adds these automatically based on offsets
@@ -361,7 +360,7 @@ df.write.format("rest").mode("overwrite") \
   .save()
 ```
 
-# Building
+## Building
 
 This project uses [Poetry](https://python-poetry.org/) to manage dependencies and building the package. 
 
@@ -375,8 +374,7 @@ Initial setup & build:
 > [!CAUTION]
 > Right now, some dependencies aren't included into manifest, so if you will try it with OSS Spark, you will need to make sure that you have following dependencies set: `pyspark[sql]` (version `4.0.0.dev2` or higher), `grpcio` (`>=1.48,<1.57`), `grpcio-status` (`>=1.48,<1.57`), `googleapis-common-protos` (`1.56.4`).
 
-
-# References
+## References
 
 - Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
 
