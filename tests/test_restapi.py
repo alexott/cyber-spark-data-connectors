@@ -69,6 +69,12 @@ class TestRestApiWriter:
         writer = RestApiBatchWriter(options)
         assert writer.payload_format == "json"
 
+    def test_init_with_form_format(self):
+        """Test initialization with form-data format."""
+        options = {"url": "http://localhost:8001", "http_format": "form-data"}
+        writer = RestApiBatchWriter(options)
+        assert writer.payload_format == "form-data"
+
     def test_init_with_custom_method(self):
         """Test initialization with custom HTTP method."""
         options = {"url": "http://localhost:8001", "http_method": "put"}
@@ -209,6 +215,89 @@ class TestRestApiWriter:
         call_args = mock_get_session.call_args
         headers = call_args[1]["additional_headers"]
         assert headers["Content-Type"] == "application/json"
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_form_format(self, mock_get_session, mock_task_context):
+        """Test write functionality with form data format."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.post.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {"url": "http://localhost:8001", "http_format": "form-data"}
+        writer = RestApiBatchWriter(options)
+        rows = [Row(id=1, name="test", value=123)]
+        commit_msg = writer.write(iter(rows))
+
+        assert commit_msg.count == 1
+        call_args = mock_session.post.call_args
+        data = call_args[1]["data"]
+        assert isinstance(data, dict)
+        assert data["id"] == "1"
+        assert data["name"] == "test"
+        assert data["value"] == "123"
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_form_format_with_none_values(self, mock_get_session, mock_task_context):
+        """Test write functionality with form data format and None values."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.post.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {"url": "http://localhost:8001", "http_format": "form-data"}
+        writer = RestApiBatchWriter(options)
+        rows = [Row(id=1, name=None, value=123)]
+        commit_msg = writer.write(iter(rows))
+
+        assert commit_msg.count == 1
+        call_args = mock_session.post.call_args
+        data = call_args[1]["data"]
+        assert isinstance(data, dict)
+        assert data["id"] == "1"
+        assert data["name"] == ""
+        assert data["value"] == "123"
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_form_format_with_put(self, mock_get_session, mock_task_context):
+        """Test write functionality with form data format and PUT method."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.put.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {"url": "http://localhost:8001", "http_format": "form-data", "http_method": "put"}
+        writer = RestApiBatchWriter(options)
+        rows = [Row(id=1, name="test")]
+        commit_msg = writer.write(iter(rows))
+
+        assert commit_msg.count == 1
+        assert mock_session.put.called
+        assert not mock_session.post.called
+        call_args = mock_session.put.call_args
+        data = call_args[1]["data"]
+        assert isinstance(data, dict)
 
 
 class TestRestApiStreamWriter:

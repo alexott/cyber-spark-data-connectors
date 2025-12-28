@@ -11,7 +11,7 @@ class RestApiDataSource(DataSource):
 
     Write options:
     - url: REST API URL
-    - http_format: (optional) format of the payload (default: json)
+    - http_format: (optional) format of the payload - json or form-data (default: json)
     - http_method: (optional) HTTP method to use - post or put (default: post)
 
     """
@@ -38,7 +38,7 @@ class RestApiWriter:
         self.payload_format: str = self.options.get("http_format", "json").lower()
         self.http_method: str = self.options.get("http_method", "post").lower()
         assert self.url is not None
-        assert self.payload_format == "json"
+        assert self.payload_format in ["json", "form-data"]
         assert self.http_method in ["post", "put"]
 
     def write(self, iterator: Iterator[Row]):
@@ -57,9 +57,14 @@ class RestApiWriter:
         cnt = 0
         for row in iterator:
             cnt += 1
-            data = ""
+            data = None
+            row_dict = row.asDict()
             if self.payload_format == "json":
-                data = json.dumps(row.asDict(), cls=DateTimeJsonEncoder)
+                data = json.dumps(row_dict, cls=DateTimeJsonEncoder)
+            elif self.payload_format == "form-data":
+                # Convert all values to strings for form data
+                data = {k: str(v) if v is not None else "" for k, v in row_dict.items()}
+            
             if self.http_method == "post":
                 response = s.post(self.url, data=data)
             elif self.http_method == "put":
