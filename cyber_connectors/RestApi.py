@@ -13,6 +13,8 @@ class RestApiDataSource(DataSource):
     - url: REST API URL
     - http_format: (optional) format of the payload - json or form-data (default: json)
     - http_method: (optional) HTTP method to use - post or put (default: post)
+    - http_header_*: (optional) custom HTTP headers. Use prefix http_header_ followed by header name.
+                     Example: http_header_Authorization, http_header_X-API-Key
 
     """
 
@@ -40,6 +42,14 @@ class RestApiWriter:
         assert self.url is not None
         assert self.payload_format in ["json", "form-data"]
         assert self.http_method in ["post", "put"]
+        
+        # Extract custom headers with http_header_ prefix
+        self.custom_headers = {}
+        header_prefix = "http_header_"
+        for key, value in self.options.items():
+            if key.startswith(header_prefix):
+                header_name = key[len(header_prefix):]
+                self.custom_headers[header_name] = value
 
     def write(self, iterator: Iterator[Row]):
         """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
@@ -47,9 +57,13 @@ class RestApiWriter:
 
         from pyspark import TaskContext
 
-        additional_headers = {}
-        if self.payload_format == "json":
-            additional_headers.update({"Content-Type": "application/json"})
+        # Start with custom headers (they take precedence)
+        additional_headers = self.custom_headers.copy()
+        
+        # Add Content-Type only if not already specified by user
+        if self.payload_format == "json" and "Content-Type" not in additional_headers:
+            additional_headers["Content-Type"] = "application/json"
+        
         # make retry_on_post configurable
         s = get_http_session(additional_headers=additional_headers, retry_on_post=True)
         context = TaskContext.get()

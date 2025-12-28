@@ -333,7 +333,7 @@ Supported streaming read options:
 
 Right now only implements writing to arbitrary REST API - both batch & streaming.  Registered data source name is `rest`.
 
-Usage:
+Basic usage:
 
 ```python
 from cyber_connectors import *
@@ -342,21 +342,60 @@ spark.dataSource.register(RestApiDataSource)
 
 df = spark.range(10)
 df.write.format("rest").mode("overwrite") \
-  .option("url", "http://localhost:8001/") \ 
+  .option("url", "http://localhost:8001/") \
+  .save()
+```
+
+Usage with authentication and custom headers:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/data") \
+  .option("http_header_Authorization", "Bearer token123") \
+  .option("http_header_X-API-Key", "secret") \
+  .save()
+```
+
+Usage with form data:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/form") \
+  .option("http_format", "form-data") \
+  .option("http_method", "post") \
   .save()
 ```
 
 Supported options:
 
 - `url` (string, required) - URL of the REST API endpoint to send data to.
-- `http_format` (string, optional, default: `json`) what payload format to use (right now only `json` is supported)
-- `http_method` (string, optional, default: `post`) what HTTP method to use (`post` or `put`).
+- `http_format` (string, optional, default: `json`) - Payload format to use. Supported values:
+  - `json` - Send data as JSON (sets `Content-Type: application/json`)
+  - `form-data` - Send data as form-encoded data (all values converted to strings)
+- `http_method` (string, optional, default: `post`) - HTTP method to use (`post` or `put`).
+- `http_header_*` (string, optional) - Custom HTTP headers. Use prefix `http_header_` followed by the header name.
+  - Example: `http_header_Authorization`, `http_header_X-API-Key`, `http_header_Content-Type`
+  - Custom headers take precedence over default headers (e.g., you can override `Content-Type` for special API requirements)
 
-This data source could be easily used to write to Tines webhook.  Just specify [Tines webhook URL](https://www.tines.com/docs/actions/types/webhook/#secrets-in-url) as `url` option:
+**Using with Tines webhook:**
+
+This data source can be easily used to write to Tines webhook. Just specify [Tines webhook URL](https://www.tines.com/docs/actions/types/webhook/#secrets-in-url) as `url` option:
 
 ```python
 df.write.format("rest").mode("overwrite") \
   .option("url", "https://tenant.tines.com/webhook/<path>/<secret>") \
+  .save()
+```
+
+**Custom Content-Type example:**
+
+Some APIs require specific Content-Type headers:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/jsonapi") \
+  .option("http_format", "json") \
+  .option("http_header_Content-Type", "application/vnd.api+json") \
   .save()
 ```
 
