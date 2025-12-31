@@ -2,8 +2,12 @@
 
 Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).  See [blog post](https://alexott.blogspot.com/2024/11/spark-custom-data-sources-and-sinks-for.html) for more details about implementation.
 
-- [Available data sourcesa](#available-data-sourcesa)
+- [Available data sources](#available-data-sources)
   - [Splunk data source](#splunk-data-source)
+    - [Writing to Splunk](#writing-to-splunk)
+    - [Reading from Splunk](#reading-from-splunk)
+      - [Batch Read](#batch-read)
+      - [Streaming Read](#streaming-read-1)
   - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
     - [Authentication Requirements](#authentication-requirements)
     - [Writing to Microsoft Sentinel / Azure Monitor](#writing-to-microsoft-sentinel--azure-monitor)
@@ -22,11 +26,13 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
 
 ### Splunk data source
 
-Right now only implements writing to [Splunk](https://www.splunk.com/) - both batch & streaming. Registered data source name is `splunk`.
+This data source supports both reading from and writing to [Splunk](https://www.splunk.com/) - both batch and streaming modes. Registered data source name is `splunk`.
+
+#### Writing to Splunk
 
 By default, this data source will put all columns into the `event` object and send it to Splunk together with metadata (`index`, `source`, ...).  This behavior could be changed by providing `single_event_column` option to specify which string column should be used as the single value of `event`.
 
-Batch usage:
+Batch write usage:
 
 ```python
 from cyber_connectors import *
@@ -38,7 +44,7 @@ df.write.format("splunk").mode("overwrite") \
   .option("token", "...").save()
 ```
 
-Streaming usage:
+Streaming write usage:
 
 ```python
 from cyber_connectors import *
@@ -63,7 +69,7 @@ stream = sdf.writeStream.format("splunk") \
   .options(**stream_options).start()
 ```
 
-Supported options:
+Supported write options:
 
 - `url` (string, required) - URL of the Splunk HTTP Event Collector (HEC) endpoint to send data to.  For example, `http://localhost:8088/collector/services/event`.
 - `token` (string, required) - HEC token to [authenticate to HEC endpoint](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector#HTTP_authentication).
@@ -76,6 +82,212 @@ Supported options:
 - `indexed_fields` (string, optional) - comma-separated list of string columns to be [indexed in the ingestion time](http://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC).
 - `remove_indexed_fields` (boolean, optional, default: `false`) - if indexed fields should be removed from the `event` object.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to Splunk.
+
+#### Reading from Splunk
+
+The data source supports both batch and streaming reads from Splunk using the [Splunk export API](https://docs.splunk.com/Documentation/Splunk/latest/RESTREF/RESTsearch#search.2Fjobs.2Fexport). You can execute SPL (Search Processing Language) queries and bring results into Spark for further analysis.
+
+> [!NOTE]
+> This is not real-time event streaming. The export API returns results for bounded time windows; streaming mode implements micro-batch polling by repeatedly querying with advancing time ranges.
+
+**Authentication Requirements:**
+
+Reading from Splunk requires authentication to the Splunk management API (splunkd). You need:
+
+- **Splunk management API URL** (`splunkd_url`): The base URL for Splunk's REST API, typically `https://<splunk-host>:8089`
+- **Authentication token** (`splunkd_token`): A Splunk authentication token for API access (NOT the same as HEC token used for writing)
+  - Can also be provided via `SPLUNK_AUTH_TOKEN` environment variable
+
+##### Batch Read
+
+Batch read usage with full SPL query:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(SplunkDataSource)
+
+# Full SPL query (recommended for complex queries)
+read_options = {
+    "splunkd_url": "https://splunk.example.com:8089",
+    "splunkd_token": "your-splunkd-token",
+    "query": "search index=main error | stats count by host",
+    "timespan": "P1D",  # Last 1 day
+}
+
+df = spark.read.format("splunk") \
+    .options(**read_options) \
+    .load()
+
+df.show()
+```
+
+Batch read with simple parameters (for basic searches):
+
+```python
+# Simple parameters mode (for basic searches only)
+read_options = {
+    "splunkd_url": "https://splunk.example.com:8089",
+    "splunkd_token": "your-splunkd-token",
+    "index": "security",
+    "sourcetype": "firewall",
+    "search_filter": "status=200",
+    "start_time": "2024-01-01T00:00:00Z",
+    "end_time": "2024-01-02T00:00:00Z",
+    "num_partitions": "4",  # Parallel reading
+}
+
+df = spark.read.format("splunk") \
+    .options(**read_options) \
+    .load()
+```
+
+Supported batch read options:
+
+**Required:**
+- `splunkd_url` (string, required) - Splunk management API URL (e.g., `https://splunk.example.com:8089`)
+- `splunkd_token` (string, required) - Splunk authentication token (or set `SPLUNK_AUTH_TOKEN` env var)
+
+**Query options (choose one approach):**
+- **Full SPL query** (preferred for complex queries):
+  - `query` (string) - Complete SPL query (e.g., `"search index=main error | stats count by status"`)
+- **Simple parameters** (for basic searches only - cannot use pipes or transforming commands):
+  - `index` (string, required if no `query`) - Splunk index name (alphanumeric, underscore, hyphen only)
+  - `sourcetype` (string, optional) - Source type filter (alphanumeric, colon, underscore, hyphen)
+  - `search_filter` (string, optional) - Additional filters (cannot contain pipes `|` or commands)
+
+**Time range options (choose one approach):**
+- `timespan` (string) - ISO 8601 duration (e.g., `"P1D"` = 1 day, `"PT6H"` = 6 hours, `"P7D"` = 7 days)
+- OR `start_time` (string) - Start time in ISO 8601 format (e.g., `"2024-01-01T00:00:00Z"`)
+  - `end_time` (string, optional) - End time in ISO 8601 format (defaults to current time if not specified)
+
+**Partitioning options:**
+- `num_partitions` (int, optional, default: 1) - Number of parallel partitions for reading
+- `partition_duration` (int, optional) - Partition duration in seconds (takes precedence over `num_partitions`)
+
+**Schema options:**
+- `inferSchema` (bool, optional, default: false) - Infer schema from sample data (queries with `| head 10`)
+- `mode` (string, optional, default: `"FAILFAST"`) - Error handling mode:
+  - `"FAILFAST"` - Raise exception on first type conversion error
+  - `"PERMISSIVE"` - Set field to null on conversion error, continue processing
+
+**Connection options:**
+- `auth_scheme` (string, optional, default: `"Splunk"`) - Authorization scheme (`"Splunk"` or `"Bearer"`)
+- `verify_ssl` (string/bool, optional, default: `"true"`) - TLS certificate verification:
+  - `"true"` - Verify using system CA bundle
+  - `"false"` - Disable verification (insecure, not recommended)
+  - Path string (e.g., `"/path/to/ca-bundle.crt"`) - Use custom CA bundle
+- `connect_timeout` (int, optional, default: 10) - Connect timeout in seconds
+- `read_timeout` (int, optional, default: 300) - Read timeout in seconds
+- `max_retries` (int, optional, default: 3) - Maximum retry attempts
+- `initial_backoff` (float, optional, default: 1.0) - Initial backoff for retries in seconds
+- `output_mode` (string, optional, default: `"json"`) - Splunk response format (`"json"` or `"json_rows"`)
+
+**SPL Query Examples:**
+
+```python
+# Get recent firewall logs
+query = "search index=security sourcetype=firewall | fields _time, src_ip, dest_ip, action"
+
+# Search for errors with stats
+query = "search index=main error | stats count by host, source"
+
+# Complex query with multiple commands
+query = "search index=web status>=400 | eval hour=strftime(_time, \"%H\") | stats count by hour"
+```
+
+**Default Schema:**
+
+If you don't specify a schema, Splunk reader returns a default schema with common Splunk fields:
+- `_time` (TimestampType) - Event timestamp
+- `_indextime` (TimestampType) - Index timestamp
+- `_raw` (StringType) - Raw event data
+- `host` (StringType) - Host field
+- `source` (StringType) - Source field
+- `sourcetype` (StringType) - Sourcetype field
+- `index` (StringType) - Index name
+
+For custom fields or typed fields, provide an explicit schema or use `inferSchema=true`.
+
+**Security Notes:**
+
+- Simple parameter mode validates inputs to prevent injection attacks
+- For queries with pipes, stats, eval, etc., use the `query` option (simple mode rejects these)
+- Tokens are never logged and can be read from environment variables
+
+##### Streaming Read
+
+The data source supports streaming reads (micro-batch polling) from Splunk. The streaming reader uses `_indextime`-based offsets to track progress.
+
+> [!IMPORTANT]
+> Streaming mode only works with **event-returning queries** (non-transforming SPL). Transforming commands like `stats`, `chart`, `timechart`, etc. produce aggregated results without `_indextime` and will cause errors.
+
+Streaming read usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(SplunkDataSource)
+
+stream_options = {
+    "splunkd_url": "https://splunk.example.com:8089",
+    "splunkd_token": "your-splunkd-token",
+    "query": "search index=security sourcetype=firewall",  # Event-returning query only
+    "start_time": "latest",  # Start from current time
+    "partition_duration": "3600",  # 1 hour partitions
+    "safety_lag_seconds": "60",  # 60 second lag for late events
+    "checkpointLocation": "/tmp/splunk-stream-checkpoint/",
+}
+
+stream_df = spark.readStream.format("splunk") \
+    .options(**stream_options) \
+    .load()
+
+# Write to console
+query = stream_df.writeStream \
+    .format("console") \
+    .trigger(availableNow=True) \
+    .option("checkpointLocation", "/tmp/splunk-stream-checkpoint/") \
+    .start()
+
+query.awaitTermination()
+```
+
+Supported streaming read options:
+
+**Required:**
+- `splunkd_url` (string, required) - Splunk management API URL
+- `splunkd_token` (string, required) - Splunk authentication token
+- `query` or `index` (string, required) - SPL query or index name (must be event-returning, no transforming commands)
+
+**Streaming-specific options:**
+- `start_time` (string, optional, default: `"latest"`) - Start time:
+  - `"latest"` - Start from current time
+  - ISO 8601 timestamp (e.g., `"2024-01-01T00:00:00Z"`) - Start from specific time
+- `partition_duration` (int, optional, default: 3600) - Partition duration in seconds (controls parallelism)
+- `safety_lag_seconds` (int, optional, default: 60) - Lag behind current time for late-arriving events
+- `allow_transforming_queries` (bool, optional, default: false) - Allow transforming queries (NOT recommended)
+
+**Important notes for streaming:**
+
+- The reader tracks `_indextime` (when Splunk indexed the event) as offset for reliable progression
+- Queries must return raw events with `_indextime` field - transforming commands (stats, chart, etc.) are rejected
+- Use `start_time: "latest"` to begin from current time (useful for monitoring new events)
+- The `safety_lag_seconds` helps handle late-arriving events that may be indexed after their event time
+
+**Query Validation:**
+
+Streaming mode automatically validates queries and rejects transforming commands:
+
+```python
+# ✅ Valid for streaming (event-returning)
+query = "search index=main error"
+query = "search index=security | fields _time, src_ip, dest_ip"
+
+# ❌ Invalid for streaming (transforming)
+query = "search index=main | stats count by host"  # Will raise error
+query = "search index=main | chart count by _time"  # Will raise error
+```
+
+To bypass validation (not recommended), set `allow_transforming_queries: "true"`.
 
 ### Microsoft Sentinel / Azure Monitor
 
