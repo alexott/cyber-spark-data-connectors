@@ -101,16 +101,10 @@ class RestApiStreamWriter(RestApiWriter, DataSourceStreamWriter):
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
-        In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
         """
-        {"num_partitions": len(messages), "rows": sum(m.count for m in messages)}
-        # with open(os.path.join(self.path, f"{batchId}.json"), "a") as file:
-        #     file.write(json.dumps(status) + "\n")
-
+        pass
+    
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
         """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
-        In this FakeStreamWriter, a failure message is written into a text file inside abort().
         """
-        # with open(os.path.join(self.path, f"{batchId}.txt"), "w") as file:
-        #     file.write(f"failed in batch {batchId}")
         pass
