@@ -1,16 +1,26 @@
 # TODO: add Azure stuff as optional dependencies
 # https://stackoverflow.com/questions/60971502/python-poetry-how-to-install-optional-dependencies
 [tool.poetry]
-name = "cyber-spark-data-connectors"
-version = "0.0.5"
+version = "0.0.6"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 authors = ["Alex Ott <alexott@gmail.com>"]
 packages = [
     {include = "cyber_connectors"}
 ]
+readme = "README.md"
+keywords = ["cybersecurity", "apache spark", "spark", "splunk", "log analytics", "ms sentinel"]
+
+[project]
+name = "cyber-spark-data-connectors"
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/alexott/cyber-spark-data-connectors"
+Issues = "https://github.com/alexott/cyber-spark-data-connectors/issues"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.14"
+python = ">=3.9,<3.15"
 requests = "^2.32.5"
 azure-monitor-ingestion = "^1.1.0"
 azure-identity = "^1.25.1"

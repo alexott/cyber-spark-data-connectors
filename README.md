@@ -1,11 +1,7 @@
 # Custom data sources/sinks for Cybersecurity-related work
 
-> [!WARNING]
-> **Experimental! Work in progress**
+Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).  See [blog post](https://alexott.blogspot.com/2024/11/spark-custom-data-sources-and-sinks-for.html) for more details about implementation.
 
-Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).
-
-- [Custom data sources/sinks for Cybersecurity-related work](#custom-data-sourcessinks-for-cybersecurity-related-work)
 - [Available data sourcesa](#available-data-sourcesa)
   - [Splunk data source](#splunk-data-source)
   - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
@@ -15,15 +11,16 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
       - [Batch Read](#batch-read)
       - [Streaming Read](#streaming-read)
   - [Simple REST API](#simple-rest-api)
-  - [Building](#building)
-  - [References](#references)
+- [Installation](#installation)
+- [Building](#building)
+- [References](#references)
 
-# Available data sourcesa
+## Available data sources
 
 > [!NOTE]
 > Most of these data sources/sinks are designed to work with relatively small amounts of data - alerts, etc.  If you need to read or write huge amounts of data, use native export/import functionality of corresponding external system.
 
-## Splunk data source
+### Splunk data source
 
 Right now only implements writing to [Splunk](https://www.splunk.com/) - both batch & streaming. Registered data source name is `splunk`.
 
@@ -80,11 +77,11 @@ Supported options:
 - `remove_indexed_fields` (boolean, optional, default: `false`) - if indexed fields should be removed from the `event` object.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to Splunk.
 
-## Microsoft Sentinel / Azure Monitor
+### Microsoft Sentinel / Azure Monitor
 
 This data source supports both reading from and writing to [Microsoft Sentinel](https://learn.microsoft.com/en-us/azure/sentinel/overview/) / [Azure Monitor Log Analytics](https://learn.microsoft.com/en-us/azure/azure-monitor/logs/log-analytics-overview). Registered data source names are `ms-sentinel` and `azure-monitor`.
 
-### Authentication Requirements
+#### Authentication Requirements
 
 This connector uses Azure Service Principal Client ID/Secret for authentication.
 
@@ -103,7 +100,7 @@ Authentication options:
   - `"government"` - Azure Government (GovCloud)
   - `"china"` - Azure China (21Vianet)
 
-### Writing to Microsoft Sentinel / Azure Monitor
+#### Writing to Microsoft Sentinel / Azure Monitor
 
 The integration uses [Logs Ingestion API of Azure Monitor](https://learn.microsoft.com/en-us/azure/sentinel/create-custom-connector#connect-with-the-log-ingestion-api) for writing data.
 
@@ -166,14 +163,14 @@ Supported write options:
 - `dcs` (string, required) - name of custom table created in the Log Analytics Workspace.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
 
-### Reading from Microsoft Sentinel / Azure Monitor
+#### Reading from Microsoft Sentinel / Azure Monitor
 
 The data source supports both batch and streaming reads from Azure Monitor / Log Analytics workspaces using KQL (Kusto Query Language) queries.  If schema isn't specified with `.schema`, it will be inferred automatically.
 
 > [!NOTE]
 > For streaming reads of big amounts of data, it's recommended to export necessary tables to EventHubs, and consume from there.
 
-#### Batch Read
+##### Batch Read
 
 Batch read usage:
 
@@ -278,7 +275,7 @@ The connector automatically handles common Azure Monitor query issues:
 
 - **Large Result Sets**: When a query exceeds Azure's [result size limits](https://learn.microsoft.com/en-us/azure/azure-monitor/service-limits#query-api) (500,000 records or ~64MB), the connector automatically subdivides the time range into smaller chunks and queries each separately. Configure the minimum subdivision size with `min_partition_seconds`.
 
-#### Streaming Read
+##### Streaming Read
 
 The data source supports streaming reads from Azure Monitor / Log Analytics. The streaming reader uses time-based offsets to track progress and splits time ranges into partitions for parallel processing.
 
@@ -329,7 +326,7 @@ Supported streaming read options:
 - The query should NOT include time filters (e.g., `where TimeGenerated > ago(1d)`) - the reader adds these automatically based on offsets
 - Use `start_time: "latest"` to begin streaming from the current time (useful for monitoring real-time data)
 
-## Simple REST API
+### Simple REST API
 
 Right now only implements writing to arbitrary REST API - both batch & streaming.  Registered data source name is `rest`.
 
@@ -397,6 +394,14 @@ df.write.format("rest").mode("overwrite") \
   .option("http_format", "json") \
   .option("http_header_Content-Type", "application/vnd.api+json") \
   .save()
+```
+
+## Installation
+
+Just install the package from PyPI:
+
+```shell
+pip install cyber-spark-data-connectors
 ```
 
 ## Building
