@@ -82,6 +82,9 @@ class TestAzureMonitorDataSource:
 
         from azure.monitor.query import LogsQueryStatus
 
+        # Use a query without limit clause so it gets modified
+        basic_options["query"] = "AzureActivity"
+
         # Create mock response for schema inference
         mock_response = Mock()
         mock_response.status = LogsQueryStatus.SUCCESS
