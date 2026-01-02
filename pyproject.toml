@@ -103,6 +103,7 @@ select = [
 ]
 ignore = [
 "D103",  # No docstring in public function
+"D401",  # First line of docstring should be in imperative mood
 "N812",  # Lowercase `functions` imported as non-lowercase `F`
 "F405",  # `assert_df_equality` may be undefined, or defined from star imports
 ]

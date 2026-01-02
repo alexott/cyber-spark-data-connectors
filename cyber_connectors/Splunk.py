@@ -464,9 +464,9 @@ class SplunkHecWriter:
             print(response.status_code, response.text)
 
     def write(self, iterator: Iterator[Row]):
-        """Writes the data, then returns the commit message of that partition.
-        Library imports must be within the method.
-        """
+        """Writes the data, then returns the commit message of that partition."""
+        
+        # Library imports must be within the method.
         import datetime
 
         from pyspark import TaskContext

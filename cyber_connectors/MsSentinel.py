@@ -463,6 +463,38 @@ class AzureMonitorDataSource(DataSource):
     - min_partition_seconds: Minimum partition duration for subdivision (default: 60)
     """
 
+    def __init__(self, options):
+        """Initialize AzureMonitorDataSource with options.
+
+        Extracts authentication options. Validation happens lazily when auth is needed.
+        Extend this method to add new auth methods.
+
+        Args:
+            options: Dictionary of options from Spark
+
+        """
+        super().__init__(options)
+
+        # Extract authentication options (centralized for easier extension)
+        # Validation is deferred to _validate_auth() when auth is actually needed
+        self.tenant_id = self.options.get("tenant_id")
+        self.client_id = self.options.get("client_id")
+        self.client_secret = self.options.get("client_secret")
+        self.azure_cloud = self.options.get("azure_cloud", "public")
+
+    def _validate_auth(self):
+        """Validate that authentication options are present and non-empty.
+
+        Called by methods that require authentication.
+
+        Raises:
+            AssertionError: If required auth options are missing or empty
+
+        """
+        assert self.tenant_id, "tenant_id is required"
+        assert self.client_id, "client_id is required"
+        assert self.client_secret, "client_secret is required"
+
     @classmethod
     def name(cls):
         return "azure-monitor"
@@ -588,23 +620,18 @@ class AzureMonitorDataSource(DataSource):
             Exception: If query returns no results or fails
 
         """
-        # Get read options
+        # Validate auth options
+        self._validate_auth()
+
+        # Get and validate read-specific options
         workspace_id = self.options.get("workspace_id")
         query = self.options.get("query")
-        tenant_id = self.options.get("tenant_id")
-        client_id = self.options.get("client_id")
-        client_secret = self.options.get("client_secret")
         timespan = self.options.get("timespan")
         start_time = self.options.get("start_time")
         end_time = self.options.get("end_time")
-        azure_cloud = self.options.get("azure_cloud", "public")
 
-        # Validate required options
-        assert workspace_id is not None, "workspace_id is required"
-        assert query is not None, "query is required"
-        assert tenant_id is not None, "tenant_id is required"
-        assert client_id is not None, "client_id is required"
-        assert client_secret is not None, "client_secret is required"
+        assert workspace_id, "workspace_id is required"
+        assert query, "query is required"
 
         # Parse time range using module-level function
         timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
@@ -614,15 +641,15 @@ class AzureMonitorDataSource(DataSource):
         if not any(keyword in sample_query.lower() for keyword in ["| take ", "| limit "]):
             sample_query = f"{sample_query} | take 1"
 
-        # Use helper method to infer schema
+        # Use helper method to infer schema (auth options from self)
         return self._infer_schema_from_query(
             workspace_id=workspace_id,
             query=sample_query,
             timespan_value=timespan_value,
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-            azure_cloud=azure_cloud,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            azure_cloud=self.azure_cloud,
         )
 
     def list_tables(self):
@@ -632,21 +659,15 @@ class AzureMonitorDataSource(DataSource):
             list[str]: List of table names sorted alphabetically
 
         Raises:
-            Exception: If workspace_id or credentials are not provided, or if query fails
+            Exception: If workspace_id is not provided, or if query fails
 
         """
-        # Get required options
-        workspace_id = self.options.get("workspace_id")
-        tenant_id = self.options.get("tenant_id")
-        client_id = self.options.get("client_id")
-        client_secret = self.options.get("client_secret")
-        azure_cloud = self.options.get("azure_cloud", "public")
+        # Validate auth options
+        self._validate_auth()
 
-        # Validate required options
-        assert workspace_id is not None, "workspace_id is required"
-        assert tenant_id is not None, "tenant_id is required"
-        assert client_id is not None, "client_id is required"
-        assert client_secret is not None, "client_secret is required"
+        # Get and validate workspace_id
+        workspace_id = self.options.get("workspace_id")
+        assert workspace_id, "workspace_id is required"
 
         # KQL query to list all distinct table names
         list_tables_query = """
@@ -663,10 +684,10 @@ class AzureMonitorDataSource(DataSource):
             workspace_id=workspace_id,
             query=list_tables_query,
             timespan=None,
-            tenant_id=tenant_id,
-            client_id=client_id,
-            client_secret=client_secret,
-            azure_cloud=azure_cloud,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            azure_cloud=self.azure_cloud,
         )
 
         # Check query status
@@ -701,7 +722,7 @@ class AzureMonitorDataSource(DataSource):
             StructType: The inferred schema for the table
 
         Raises:
-            Exception: If workspace_id or credentials are not provided, or if query fails
+            Exception: If workspace_id is not provided, or if query fails
             ValueError: If table_name is empty or invalid
 
         """
@@ -719,18 +740,12 @@ class AzureMonitorDataSource(DataSource):
                 "table_name contains invalid characters (allowed: letters, digits, underscore, hyphen)."
             )
 
-        # Get required options
-        workspace_id = self.options.get("workspace_id")
-        tenant_id = self.options.get("tenant_id")
-        client_id = self.options.get("client_id")
-        client_secret = self.options.get("client_secret")
-        azure_cloud = self.options.get("azure_cloud", "public")
+        # Validate auth options
+        self._validate_auth()
 
-        # Validate required options
-        assert workspace_id is not None, "workspace_id is required"
-        assert tenant_id is not None, "tenant_id is required"
-        assert client_id is not None, "client_id is required"
-        assert client_secret is not None, "client_secret is required"
+        # Get and validate workspace_id
+        workspace_id = self.options.get("workspace_id")
+        assert workspace_id, "workspace_id is required"
 
         # Create query to get one row from the table
         sample_query = f"{table_name} | take 1"
@@ -742,10 +757,10 @@ class AzureMonitorDataSource(DataSource):
                 workspace_id=workspace_id,
                 query=sample_query,
                 timespan_value=None,
-                tenant_id=tenant_id,
-                client_id=client_id,
-                client_secret=client_secret,
-                azure_cloud=azure_cloud,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
             )
         except Exception as e:
             # Re-raise with table-specific error message
@@ -789,22 +804,22 @@ class AzureMonitorReader:
             schema: StructType schema (provided by DataSource.schema())
 
         """
-        # Extract and validate required options
-        self.workspace_id = options.get("workspace_id")
-        self.query = options.get("query")
+        # Extract and validate authentication options
         self.tenant_id = options.get("tenant_id")
         self.client_id = options.get("client_id")
         self.client_secret = options.get("client_secret")
-
-        # Validate required options
-        assert self.workspace_id is not None, "workspace_id is required"
-        assert self.query is not None, "query is required"
-        assert self.tenant_id is not None, "tenant_id is required"
-        assert self.client_id is not None, "client_id is required"
-        assert self.client_secret is not None, "client_secret is required"
-
-        # Azure cloud environment: "public" (default), "government", or "china"
         self.azure_cloud = options.get("azure_cloud", "public")
+
+        assert self.tenant_id, "tenant_id is required"
+        assert self.client_id, "client_id is required"
+        assert self.client_secret, "client_secret is required"
+
+        # Extract and validate read-specific options
+        self.workspace_id = options.get("workspace_id")
+        self.query = options.get("query")
+
+        assert self.workspace_id, "workspace_id is required"
+        assert self.query, "query is required"
 
         # Retry and subdivision options
         self.max_retries = int(options.get("max_retries", "5"))
@@ -1173,19 +1188,25 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 class AzureMonitorWriter:
     def __init__(self, options):
         self.options = options
-        self.dce = self.options.get("dce")  # data_collection_endpoint
-        self.dcr_id = self.options.get("dcr_id")  # data_collection_rule_id
-        self.dcs = self.options.get("dcs")  # data_collection_stream
+
+        # Extract and validate authentication options
         self.tenant_id = self.options.get("tenant_id")
         self.client_id = self.options.get("client_id")
         self.client_secret = self.options.get("client_secret")
+
+        assert self.tenant_id, "tenant_id is required"
+        assert self.client_id, "client_id is required"
+        assert self.client_secret, "client_secret is required"
+
+        # Extract and validate write-specific options
+        self.dce = self.options.get("dce")  # data_collection_endpoint
+        self.dcr_id = self.options.get("dcr_id")  # data_collection_rule_id
+        self.dcs = self.options.get("dcs")  # data_collection_stream
         self.batch_size = int(self.options.get("batch_size", "50"))
-        assert self.dce is not None
-        assert self.dcr_id is not None
-        assert self.dcs is not None
-        assert self.tenant_id is not None
-        assert self.client_id is not None
-        assert self.client_secret is not None
+
+        assert self.dce, "dce (data collection endpoint) is required"
+        assert self.dcr_id, "dcr_id (data collection rule ID) is required"
+        assert self.dcs, "dcs (data collection stream) is required"
 
     def _send_to_sentinel(self, s: LogsIngestionClient, msgs: list):
         if len(msgs) > 0:
