@@ -2,18 +2,19 @@
 
 Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/python/user_guide/sql/python_data_source.html) available with Spark 4 & [DBR 15.3+](https://docs.databricks.com/en/pyspark/datasources.html).  See [blog post](https://alexott.blogspot.com/2024/11/spark-custom-data-sources-and-sinks-for.html) for more details about implementation.
 
-- [Available data sourcesa](#available-data-sourcesa)
-  - [Splunk data source](#splunk-data-source)
-  - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
-    - [Authentication Requirements](#authentication-requirements)
-    - [Writing to Microsoft Sentinel / Azure Monitor](#writing-to-microsoft-sentinel--azure-monitor)
-    - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
-      - [Batch Read](#batch-read)
-      - [Streaming Read](#streaming-read)
-  - [Simple REST API](#simple-rest-api)
-- [Installation](#installation)
-- [Building](#building)
-- [References](#references)
+- [Custom data sources/sinks for Cybersecurity-related work](#custom-data-sourcessinks-for-cybersecurity-related-work)
+  - [Available data sources](#available-data-sources)
+    - [Splunk data source](#splunk-data-source)
+    - [Microsoft Sentinel / Azure Monitor](#microsoft-sentinel--azure-monitor)
+      - [Authentication Requirements](#authentication-requirements)
+      - [Writing to Microsoft Sentinel / Azure Monitor](#writing-to-microsoft-sentinel--azure-monitor)
+      - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
+        - [Batch Read](#batch-read)
+        - [Streaming Read](#streaming-read)
+    - [Simple REST API](#simple-rest-api)
+  - [Installation](#installation)
+  - [Building](#building)
+  - [References](#references)
 
 ## Available data sources
 
@@ -293,7 +294,6 @@ stream_options = {
     "tenant_id": tenant_id,
     "client_id": client_id,
     "client_secret": client_secret,
-    "checkpointLocation": "/tmp/azure-monitor-checkpoint/",
     "partition_duration": "3600",  # Optional: partition size in seconds (default 1 hour)
 }
 

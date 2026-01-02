@@ -483,14 +483,23 @@ class AzureMonitorDataSource(DataSource):
         else:
             raise Exception("Must provide schema if inferSchema is false")
 
-    def _infer_read_schema(self):
-        """Infer schema by executing a sample query with limit 1.
+    def _infer_schema_from_query(self, workspace_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud):
+        """Helper method to infer schema by executing a query and analyzing the first row.
+
+        Args:
+            workspace_id: Log Analytics workspace ID
+            query: KQL query to execute (should include | take 1 or | limit 1)
+            timespan_value: Time range as tuple (start_time, end_time)
+            tenant_id: Azure tenant ID
+            client_id: Azure service principal client ID
+            client_secret: Azure service principal client secret
+            azure_cloud: Azure cloud environment
 
         Returns:
             StructType: The inferred schema
 
         Raises:
-            Exception: If query returns no results or fails
+            Exception: If query fails or returns no data
 
         """
         from pyspark.sql.types import (
@@ -503,39 +512,12 @@ class AzureMonitorDataSource(DataSource):
             StructType,
             TimestampType,
         )
-
-        # Get read options
-        workspace_id = self.options.get("workspace_id")
-        query = self.options.get("query")
-        tenant_id = self.options.get("tenant_id")
-        client_id = self.options.get("client_id")
-        client_secret = self.options.get("client_secret")
-        timespan = self.options.get("timespan")
-        start_time = self.options.get("start_time")
-        end_time = self.options.get("end_time")
-        azure_cloud = self.options.get("azure_cloud", "public")
-
-        # Validate required options
-        assert workspace_id is not None, "workspace_id is required"
-        assert query is not None, "query is required"
-        assert tenant_id is not None, "tenant_id is required"
-        assert client_id is not None, "client_id is required"
-        assert client_secret is not None, "client_secret is required"
-
-        # Parse time range using module-level function
-        timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
-
-        # Modify query to limit results to 1 row
-        sample_query = query.strip()
-        if not any(keyword in sample_query.lower() for keyword in ["| take 1", "| limit 1"]):
-            sample_query = f"{sample_query} | take 1"
-
-        # Execute sample query using module-level function
         from azure.monitor.query import LogsQueryStatus
 
+        # Execute query
         response = _execute_logs_query(
             workspace_id=workspace_id,
-            query=sample_query,
+            query=query,
             timespan=timespan_value,
             tenant_id=tenant_id,
             client_id=client_id,
@@ -564,7 +546,6 @@ class AzureMonitorDataSource(DataSource):
             return StructType(fields)
 
         # Infer schema from actual data in the first row
-        # table.columns is always a list of strings (column names)
         first_row = table.rows[0]
         fields = []
 
@@ -596,6 +577,182 @@ class AzureMonitorDataSource(DataSource):
             fields.append(StructField(column_name, spark_type, nullable=True))
 
         return StructType(fields)
+
+    def _infer_read_schema(self):
+        """Infer schema by executing a sample query with limit 1.
+
+        Returns:
+            StructType: The inferred schema
+
+        Raises:
+            Exception: If query returns no results or fails
+
+        """
+        # Get read options
+        workspace_id = self.options.get("workspace_id")
+        query = self.options.get("query")
+        tenant_id = self.options.get("tenant_id")
+        client_id = self.options.get("client_id")
+        client_secret = self.options.get("client_secret")
+        timespan = self.options.get("timespan")
+        start_time = self.options.get("start_time")
+        end_time = self.options.get("end_time")
+        azure_cloud = self.options.get("azure_cloud", "public")
+
+        # Validate required options
+        assert workspace_id is not None, "workspace_id is required"
+        assert query is not None, "query is required"
+        assert tenant_id is not None, "tenant_id is required"
+        assert client_id is not None, "client_id is required"
+        assert client_secret is not None, "client_secret is required"
+
+        # Parse time range using module-level function
+        timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
+
+        # Modify query to limit results to 1 row
+        sample_query = query.strip()
+        if not any(keyword in sample_query.lower() for keyword in ["| take ", "| limit "]):
+            sample_query = f"{sample_query} | take 1"
+
+        # Use helper method to infer schema
+        return self._infer_schema_from_query(
+            workspace_id=workspace_id,
+            query=sample_query,
+            timespan_value=timespan_value,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            azure_cloud=azure_cloud,
+        )
+
+    def list_tables(self):
+        """List all tables in the Log Analytics workspace.
+
+        Returns:
+            list[str]: List of table names sorted alphabetically
+
+        Raises:
+            Exception: If workspace_id or credentials are not provided, or if query fails
+
+        """
+        # Get required options
+        workspace_id = self.options.get("workspace_id")
+        tenant_id = self.options.get("tenant_id")
+        client_id = self.options.get("client_id")
+        client_secret = self.options.get("client_secret")
+        azure_cloud = self.options.get("azure_cloud", "public")
+
+        # Validate required options
+        assert workspace_id is not None, "workspace_id is required"
+        assert tenant_id is not None, "tenant_id is required"
+        assert client_id is not None, "client_id is required"
+        assert client_secret is not None, "client_secret is required"
+
+        # KQL query to list all distinct table names
+        list_tables_query = """
+        search *
+        | distinct $table
+        | sort by $table asc
+        """
+
+        # Execute query using module-level function without timespan restriction
+        # (None timespan allows querying all available data to discover all tables)
+        from azure.monitor.query import LogsQueryStatus
+
+        response = _execute_logs_query(
+            workspace_id=workspace_id,
+            query=list_tables_query,
+            timespan=None,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            azure_cloud=azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            raise Exception(f"Query failed with status: {response.status}")
+
+        # Check if we got any tables
+        if not response.tables or len(response.tables) == 0:
+            return []
+
+        table = response.tables[0]
+
+        # Extract table names from results
+        # The $table column should be the first (and only) column
+        table_names = []
+        for row in table.rows:
+            if row and len(row) > 0:
+                table_name = row[0]
+                if table_name:
+                    table_names.append(str(table_name))
+
+        # KQL query sorts by $table, but sort again here to ensure deterministic results
+        return sorted(table_names)
+
+    def get_table_schema(self, table_name: str):
+        """Get the schema for a specific table by inferring it from a sample query.
+
+        Args:
+            table_name: Name of the table to get schema for
+
+        Returns:
+            StructType: The inferred schema for the table
+
+        Raises:
+            Exception: If workspace_id or credentials are not provided, or if query fails
+            ValueError: If table_name is empty or invalid
+
+        """
+        # Validate table name
+        if not table_name or not isinstance(table_name, str) or not table_name.strip():
+            raise ValueError("table_name must be a non-empty string")
+
+        table_name = table_name.strip()
+        import re
+
+        # Guard against KQL injection by validating allowed identifier characters.
+        # We intentionally disallow whitespace, pipes, quotes, and other KQL operators/commands.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", table_name):
+            raise ValueError(
+                "table_name contains invalid characters (allowed: letters, digits, underscore, hyphen)."
+            )
+
+        # Get required options
+        workspace_id = self.options.get("workspace_id")
+        tenant_id = self.options.get("tenant_id")
+        client_id = self.options.get("client_id")
+        client_secret = self.options.get("client_secret")
+        azure_cloud = self.options.get("azure_cloud", "public")
+
+        # Validate required options
+        assert workspace_id is not None, "workspace_id is required"
+        assert tenant_id is not None, "tenant_id is required"
+        assert client_id is not None, "client_id is required"
+        assert client_secret is not None, "client_secret is required"
+
+        # Create query to get one row from the table
+        sample_query = f"{table_name} | take 1"
+
+        # Use helper method to infer schema without timespan restriction
+        # (None timespan allows querying all available data)
+        try:
+            return self._infer_schema_from_query(
+                workspace_id=workspace_id,
+                query=sample_query,
+                timespan_value=None,
+                tenant_id=tenant_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                azure_cloud=azure_cloud,
+            )
+        except Exception as e:
+            # Re-raise with table-specific error message
+            if "Schema inference failed" in str(e) and table_name not in str(e):
+                inner = str(e).replace("Schema inference failed: ", "")
+                raise Exception(f"Schema inference failed for table '{table_name}': {inner}") from e
+            raise
 
     def reader(self, schema: StructType):
         return AzureMonitorBatchReader(self.options, schema)
