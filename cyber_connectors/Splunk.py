@@ -3,7 +3,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Iterator
+from typing import Any, Iterator, Mapping
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -62,6 +62,48 @@ def _parse_time_range(timespan=None, start_time=None, end_time=None):
         return (start_time_val, end_time_val)
     else:
         raise Exception("Either 'timespan' or 'start_time' must be provided")
+
+
+def _build_spl_query_from_options(options: Mapping[str, Any]) -> str:
+    """Build SPL query from options.
+
+    If `query` is provided, it is returned as-is. Otherwise, build a simple SPL query from:
+    - index (required if query is not provided)
+    - sourcetype (optional)
+    - search_filter (optional, validated for unsafe characters)
+    """
+    query = options.get("query")
+    if query:
+        return str(query)
+
+    # Build from simple parameters
+    index = options.get("index")
+    sourcetype = options.get("sourcetype")
+    search_filter = options.get("search_filter")
+
+    # Validate simple parameters
+    if index and not re.match(r"^[a-zA-Z0-9_-]+$", str(index)):
+        raise ValueError(f"Invalid index name: {index}")
+
+    if sourcetype and not re.match(r"^[a-zA-Z0-9:_-]+$", str(sourcetype)):
+        raise ValueError(f"Invalid sourcetype: {sourcetype}")
+
+    if search_filter:
+        dangerous = ["|", "`", "$", ";"]
+        if any(char in str(search_filter) for char in dangerous):
+            raise ValueError(f"search_filter cannot contain: {dangerous}")
+
+    # Build SPL
+    if not index:
+        raise ValueError("Either 'query' or 'index' must be provided")
+
+    spl = f"search index={index}"
+    if sourcetype:
+        spl += f" sourcetype={sourcetype}"
+    if search_filter:
+        spl += f" {search_filter}"
+
+    return spl
 
 
 def _convert_value_to_schema_type(value, spark_type):
@@ -240,12 +282,14 @@ class SplunkDataSource(DataSource):
         """
         # Get read options
         splunkd_url = self.options.get("splunkd_url")
-        splunkd_token = self.options.get("splunkd_token")
+        import os
+
+        splunkd_token = self.options.get("splunkd_token") or os.environ.get("SPLUNK_AUTH_TOKEN")
         query = self._build_spl_query()
 
         # Validate required options
         assert splunkd_url is not None, "splunkd_url is required"
-        assert splunkd_token is not None, "splunkd_token is required"
+        assert splunkd_token is not None, "splunkd_token is required (or set SPLUNK_AUTH_TOKEN env var)"
 
         # Add | head 10 to sample query
         sample_query = query.strip()
@@ -310,38 +354,7 @@ class SplunkDataSource(DataSource):
             str: The SPL query string
 
         """
-        query = self.options.get("query")
-        if query:
-            return query
-
-        # Build from simple parameters
-        index = self.options.get("index")
-        sourcetype = self.options.get("sourcetype")
-        search_filter = self.options.get("search_filter")
-
-        # Validate simple parameters
-        if index and not re.match(r"^[a-zA-Z0-9_-]+$", index):
-            raise ValueError(f"Invalid index name: {index}")
-
-        if sourcetype and not re.match(r"^[a-zA-Z0-9:_-]+$", sourcetype):
-            raise ValueError(f"Invalid sourcetype: {sourcetype}")
-
-        if search_filter:
-            dangerous = ["|", "`", "$", ";"]
-            if any(char in search_filter for char in dangerous):
-                raise ValueError(f"search_filter cannot contain: {dangerous}")
-
-        # Build SPL
-        if not index:
-            raise ValueError("Either 'query' or 'index' must be provided")
-
-        spl = f"search index={index}"
-        if sourcetype:
-            spl += f" sourcetype={sourcetype}"
-        if search_filter:
-            spl += f" {search_filter}"
-
-        return spl
+        return _build_spl_query_from_options(self.options)
 
     def _create_session(self):
         """Create HTTP session with auth and retry logic.
@@ -396,22 +409,17 @@ class SplunkDataSource(DataSource):
 
         export_url = f"{splunkd_url.rstrip('/')}/services/search/jobs/export"
 
-        last_exception = None
         for attempt in range(max_retries + 1):
             try:
                 response = session.post(export_url, data=form_data, timeout=timeout, stream=True)
                 response.raise_for_status()
                 return response
-            except Exception as e:
-                last_exception = e
+            except Exception:
                 if attempt < max_retries:
                     wait = initial_backoff * (2**attempt)
                     time.sleep(wait)
                 else:
                     raise
-
-        if last_exception:
-            raise last_exception
 
     def reader(self, schema: StructType):
         return SplunkBatchReader(self.options, schema)
@@ -460,7 +468,6 @@ class SplunkHecWriter:
         Library imports must be within the method.
         """
         import datetime
-        import json
 
         from pyspark import TaskContext
 
@@ -577,38 +584,7 @@ class SplunkReader:
 
     def _build_spl_query(self, options):
         """Build SPL query from options."""
-        query = options.get("query")
-        if query:
-            return query
-
-        # Build from simple parameters
-        index = options.get("index")
-        sourcetype = options.get("sourcetype")
-        search_filter = options.get("search_filter")
-
-        # Validate simple parameters
-        if index and not re.match(r"^[a-zA-Z0-9_-]+$", index):
-            raise ValueError(f"Invalid index name: {index}")
-
-        if sourcetype and not re.match(r"^[a-zA-Z0-9:_-]+$", sourcetype):
-            raise ValueError(f"Invalid sourcetype: {sourcetype}")
-
-        if search_filter:
-            dangerous = ["|", "`", "$", ";"]
-            if any(char in search_filter for char in dangerous):
-                raise ValueError(f"search_filter cannot contain: {dangerous}")
-
-        # Build SPL
-        if not index:
-            raise ValueError("Either 'query' or 'index' must be provided")
-
-        spl = f"search index={index}"
-        if sourcetype:
-            spl += f" sourcetype={sourcetype}"
-        if search_filter:
-            spl += f" {search_filter}"
-
-        return spl
+        return _build_spl_query_from_options(options)
 
     def _parse_verify_ssl(self, verify_ssl):
         """Parse verify_ssl option."""
@@ -649,22 +625,17 @@ class SplunkReader:
         export_url = f"{self.splunkd_url.rstrip('/')}/services/search/jobs/export"
         timeout = (self.connect_timeout, self.read_timeout)
 
-        last_exception = None
         for attempt in range(self.max_retries + 1):
             try:
                 response = session.post(export_url, data=form_data, timeout=timeout, stream=True)
                 response.raise_for_status()
                 return response
-            except Exception as e:
-                last_exception = e
+            except Exception:
                 if attempt < self.max_retries:
                     wait = self.initial_backoff * (2**attempt)
                     time.sleep(wait)
                 else:
                     raise
-
-        if last_exception:
-            raise last_exception
 
     def _parse_response(self, response):
         """Parse streaming JSON response from export endpoint.
