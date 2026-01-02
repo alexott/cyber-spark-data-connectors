@@ -275,6 +275,91 @@ class TestAzureMonitorDataSource:
             assert schema.fields[i].name == expected_name
             assert isinstance(schema.fields[i].dataType, expected_type_class)
 
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_success(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables returns sorted table names."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Unsorted input to ensure we sort deterministically
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.rows = [["SecurityEvent"], ["AzureActivity"]]
+        mock_response.tables = [mock_table]
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        result = ds.list_tables()
+
+        assert result == ["AzureActivity", "SecurityEvent"]
+
+        call_kwargs = mock_execute_logs_query.call_args[1]
+        assert "distinct $table" in call_kwargs["query"]
+        assert call_kwargs["timespan"] is None
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_empty_results(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables returns [] when query returns no tables."""
+        from azure.monitor.query import LogsQueryStatus
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        assert ds.list_tables() == []
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_query_failure_raises(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables raises when query fails."""
+        from azure.monitor.query import LogsQueryStatus
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.FAILURE
+        mock_response.tables = []
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        with pytest.raises(Exception, match="Query failed with status"):
+            ds.list_tables()
+
+    def test_get_table_schema_invalid_table_name_rejected(self, basic_options):
+        """Test that get_table_schema validates table name to prevent KQL injection."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        with pytest.raises(ValueError, match="non-empty"):
+            ds.get_table_schema("")
+
+        with pytest.raises(ValueError, match="invalid characters"):
+            ds.get_table_schema("AzureActivity | take 1")
+
+    def test_get_table_schema_success_calls_infer(self, basic_options):
+        """Test that get_table_schema delegates to _infer_schema_from_query with expected query."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        expected_schema = StructType([StructField("TestCol", StringType(), True)])
+        with patch.object(AzureMonitorDataSource, "_infer_schema_from_query", return_value=expected_schema) as mock_infer:
+            result = ds.get_table_schema("AzureActivity")
+
+        assert result == expected_schema
+
+        call_kwargs = mock_infer.call_args[1]
+        assert call_kwargs["query"] == "AzureActivity | take 1"
+        assert call_kwargs["timespan_value"] is None
+
+    def test_get_table_schema_wraps_schema_inference_error_with_table(self, basic_options):
+        """Test that get_table_schema includes table name in Schema inference error."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        with patch.object(
+            AzureMonitorDataSource,
+            "_infer_schema_from_query",
+            side_effect=Exception("Schema inference failed: query returned no tables"),
+        ):
+            with pytest.raises(Exception, match="AzureActivity"):
+                ds.get_table_schema("AzureActivity")
+
 
 class TestAzureMonitorBatchReader:
     """Test Azure Monitor Batch Reader implementation."""

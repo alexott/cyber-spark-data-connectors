@@ -688,7 +688,8 @@ class AzureMonitorDataSource(DataSource):
                 if table_name:
                     table_names.append(str(table_name))
 
-        return table_names
+        # KQL query sorts by $table, but sort again here to ensure deterministic results
+        return sorted(table_names)
 
     def get_table_schema(self, table_name: str):
         """Get the schema for a specific table by inferring it from a sample query.
@@ -709,6 +710,14 @@ class AzureMonitorDataSource(DataSource):
             raise ValueError("table_name must be a non-empty string")
 
         table_name = table_name.strip()
+        import re
+
+        # Guard against KQL injection by validating allowed identifier characters.
+        # We intentionally disallow whitespace, pipes, quotes, and other KQL operators/commands.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", table_name):
+            raise ValueError(
+                "table_name contains invalid characters (allowed: letters, digits, underscore, hyphen)."
+            )
 
         # Get required options
         workspace_id = self.options.get("workspace_id")
@@ -741,7 +750,8 @@ class AzureMonitorDataSource(DataSource):
         except Exception as e:
             # Re-raise with table-specific error message
             if "Schema inference failed" in str(e) and table_name not in str(e):
-                raise Exception(f"Schema inference failed for table '{table_name}': {str(e).replace('Schema inference failed: ', '')}")
+                inner = str(e).replace("Schema inference failed: ", "")
+                raise Exception(f"Schema inference failed for table '{table_name}': {inner}") from e
             raise
 
     def reader(self, schema: StructType):
