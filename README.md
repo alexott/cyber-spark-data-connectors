@@ -492,7 +492,7 @@ The connector automatically handles common Azure Monitor query issues:
 
 The data source supports streaming reads from Azure Monitor / Log Analytics. The streaming reader uses time-based offsets to track progress and splits time ranges into partitions for parallel processing.
 
-Streaming read usage:
+**Basic streaming read usage:**
 
 ```python
 from cyber_connectors import *
@@ -528,7 +528,11 @@ Supported streaming read options:
 
 - `workspace_id` (string, required) - Log Analytics workspace ID
 - `query` (string, required) - KQL query to execute (could be just a table name). Note: *it should not include time filters - these are added automatically!*
-- `start_time` (string, optional, default: "latest") - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). Use "latest" to start from the current time
+- `start_time` (string, optional, default: "latest") - Starting timestamp for streaming. Supports three formats:
+  - `"latest"` (default) - Start from current time (monitor new data)
+  - `"earliest"` - Automatically detect and start from the earliest timestamp in the data
+  - ISO 8601 timestamp (e.g., "2024-01-01T00:00:00Z") - Start from a specific time
+- `timestamp_column` (string, optional, default: "TimeGenerated") - Column name to use for timestamp when `start_time="earliest"` is specified
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
 
 **Important notes for streaming:**
@@ -537,6 +541,64 @@ Supported streaming read options:
 - Time ranges are split into partitions based on `partition_duration` for parallel processing
 - The query should NOT include time filters (e.g., `where TimeGenerated > ago(1d)`) - the reader adds these automatically based on offsets
 - Use `start_time: "latest"` to begin streaming from the current time (useful for monitoring real-time data)
+- Use `start_time: "earliest"` to automatically detect and start from the earliest timestamp in the data
+
+**Start time options:**
+
+The `start_time` option supports three modes:
+
+1. **`"latest"` (default)**: Start streaming from current time - useful for monitoring new events
+2. **`"earliest"`: Automatically detect earliest timestamp** - queries the data to find the minimum timestamp and starts from there. Useful for backfilling historical data.
+   - Uses `TimeGenerated` column by default
+   - Override with `timestamp_column` option for custom timestamp columns
+   - **Note**: Executes a query during initialization (one-time cost); may be slow for very large tables
+3. **ISO 8601 timestamp** (e.g., `"2024-01-01T00:00:00Z"`): Start from specific time
+
+**Example with "earliest":**
+
+```python
+# Start from the earliest data available in the table
+stream_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "SecurityEvent",
+    "start_time": "earliest",  # Auto-detect earliest timestamp
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+stream_df = spark.readStream.format("azure-monitor") \
+    .options(**stream_options) \
+    .load()
+```
+
+**Example with custom timestamp column:**
+
+```python
+# Use custom timestamp column with "earliest"
+stream_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "CustomTable_CL",
+    "start_time": "earliest",
+    "timestamp_column": "EventTime",  # Use custom column instead of TimeGenerated
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+```
+
+**Additional streaming options:**
+
+- `inferSchema` (bool, optional, default: true) - if we do the schema inference by sampling result
+- `max_retries` (int, optional, default: 5) - Maximum retry attempts for HTTP 429 throttling errors
+- `initial_backoff` (float, optional, default: 1.0) - Initial backoff time in seconds for retries
+- `min_partition_seconds` (int, optional, default: 60) - Minimum partition duration in seconds when subdividing large result sets
+
+**Potential Issues with "earliest":**
+
+- **Performance**: For very large tables without time-based indexes, the `min(timestamp_column)` query may be slow. This is a one-time cost during stream initialization.
+- **Aggregated queries**: If the query contains aggregations (e.g., `| summarize`), "earliest" will find the minimum timestamp from the aggregated results, not from raw data.
+- **Empty tables**: If the table has no data, falls back to current timestamp.
 
 ### Simple REST API
 

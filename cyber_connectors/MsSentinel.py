@@ -449,10 +449,9 @@ class AzureMonitorDataSource(DataSource):
     - client_id: Azure service principal ID
     - client_secret: Azure service principal client secret
 
-    Read options:
+    Read options (batch and streaming):
     - workspace_id: Log Analytics workspace ID
     - query: KQL query to execute (could be just a table name)
-    - timespan: Time range for query in ISO 8601 duration format
     - tenant_id: Azure tenant ID
     - client_id: Azure service principal ID
     - client_secret: Azure service principal client secret
@@ -461,6 +460,27 @@ class AzureMonitorDataSource(DataSource):
     - max_retries: Maximum retry attempts for throttling (default: 5)
     - initial_backoff: Initial backoff time in seconds for retries (default: 1.0)
     - min_partition_seconds: Minimum partition duration for subdivision (default: 60)
+
+    Batch read options:
+    - timespan: Time range for query in ISO 8601 duration format
+    - start_time: ISO 8601 datetime string (e.g., "2024-01-01T00:00:00Z")
+    - end_time: ISO 8601 datetime string (optional, defaults to now)
+    - num_partitions: Number of time-based partitions for parallel reading (default: 1)
+
+    Streaming read options:
+    - start_time: Starting timestamp for streaming. Supports three formats:
+        * "latest" (default): Start from current time
+        * "earliest": Automatically detect earliest timestamp in data
+        * ISO 8601 timestamp string: Explicit start time
+    - partition_duration: Duration of each partition in seconds (default: 3600 = 1 hour)
+    - timestamp_column: Column name for timestamp when using "earliest" (default: "TimeGenerated")
+
+    Potential issues with "earliest" option:
+    - Performance: For very large tables without time-based indexes, the min(timestamp_column)
+      query may be slow. This is a one-time cost during stream initialization.
+    - Aggregated queries: If the query contains aggregations (e.g., | summarize), "earliest"
+      will find the minimum timestamp from the aggregated results, not from raw data.
+    - Empty tables: If the table has no data, falls back to current timestamp.
     """
 
     def __init__(self, options):
@@ -515,7 +535,9 @@ class AzureMonitorDataSource(DataSource):
         else:
             raise Exception("Must provide schema if inferSchema is false")
 
-    def _infer_schema_from_query(self, workspace_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud):
+    def _infer_schema_from_query(
+        self, workspace_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud
+    ):
         """Helper method to infer schema by executing a query and analyzing the first row.
 
         Args:
@@ -736,9 +758,7 @@ class AzureMonitorDataSource(DataSource):
         # Guard against KQL injection by validating allowed identifier characters.
         # We intentionally disallow whitespace, pipes, quotes, and other KQL operators/commands.
         if not re.fullmatch(r"[A-Za-z0-9_-]+", table_name):
-            raise ValueError(
-                "table_name contains invalid characters (allowed: letters, digits, underscore, hyphen)."
-            )
+            raise ValueError("table_name contains invalid characters (allowed: letters, digits, underscore, hyphen).")
 
         # Validate auth options
         self._validate_auth()
@@ -1060,6 +1080,17 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
     Implements incremental streaming by tracking time-based offsets and splitting
     time ranges into partitions for parallel processing.
+
+    Stream-specific options:
+    - start_time: Starting timestamp for streaming. Supports three formats:
+        * "latest" (default): Start from current time
+        * "earliest": Automatically detect earliest timestamp in data (executes query during init)
+        * ISO 8601 timestamp string (e.g., "2024-01-01T00:00:00Z"): Explicit start time
+    - partition_duration: Duration of each partition in seconds (default: 3600 = 1 hour)
+    - timestamp_column: Column name for timestamp detection when using "earliest" (default: "TimeGenerated")
+
+    Note: When using start_time="earliest", a query is executed during initialization to find
+    the minimum timestamp in the data. This is a one-time cost but may be slow for very large tables.
     """
 
     def __init__(self, options, schema: StructType):
@@ -1073,12 +1104,19 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         super().__init__(options, schema)
 
         # Stream-specific options
+        # Timestamp column for earliest detection (default: TimeGenerated)
+        self.timestamp_column = options.get("timestamp_column", "TimeGenerated")
+
         start_time = options.get("start_time", "latest")
         # Support 'latest' as alias for current timestamp
         if start_time == "latest":
             from datetime import datetime, timezone
 
             self.start_time = datetime.now(timezone.utc).isoformat()
+        elif start_time == "earliest":
+            # Query to find the earliest timestamp in the data
+            # Note: This executes a query during initialization (one-time cost)
+            self.start_time = self._get_earliest_timestamp()
         else:
             # Validate that start_time is a valid ISO 8601 timestamp
             from datetime import datetime
@@ -1088,11 +1126,76 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
                 self.start_time = start_time
             except (ValueError, AttributeError) as e:
                 raise ValueError(
-                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z')"
+                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
                 ) from e
 
         # Partition duration in seconds (default 1 hour)
         self.partition_duration = int(options.get("partition_duration", "3600"))
+
+    def _get_earliest_timestamp(self):
+        """Query to find the earliest timestamp in the data.
+
+        Executes a KQL query to find the minimum value of the timestamp column
+        in the dataset. This is used when start_time="earliest" is specified.
+
+        Returns:
+            str: ISO 8601 formatted timestamp of the earliest data point
+
+        Raises:
+            Exception: If query execution fails
+
+        Note:
+            - If the query returns no data (empty table), falls back to current time
+            - Uses the timestamp_column option (default: "TimeGenerated")
+            - Executes with timespan=None to query all available data
+            - For tables with existing aggregations in the query, this finds the
+              earliest timestamp from the aggregated results, not raw data
+
+        """
+        from datetime import datetime, timezone
+        from azure.monitor.query import LogsQueryStatus
+
+        # Construct query to find earliest timestamp
+        # Format: {original_query} | summarize earliest=min({timestamp_column})
+        earliest_query = f"{self.query} | summarize earliest=min({self.timestamp_column})"
+
+        # Execute query without timespan restriction to find absolute earliest
+        response = _execute_logs_query(
+            workspace_id=self.workspace_id,
+            query=earliest_query,
+            timespan=None,  # No time restriction
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            max_retries=self.max_retries,
+            initial_backoff=self.initial_backoff,
+            azure_cloud=self.azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            # If query fails, fallback to current time
+            return datetime.now(timezone.utc).isoformat()
+
+        # Extract the earliest timestamp from response
+        if response.tables and len(response.tables) > 0:
+            table = response.tables[0]
+            if table.rows and len(table.rows) > 0:
+                earliest_value = table.rows[0][0]
+                if earliest_value is not None:
+                    # Handle both datetime objects and string values
+                    if isinstance(earliest_value, datetime):
+                        return earliest_value.isoformat()
+                    elif isinstance(earliest_value, str):
+                        # Validate and normalize the timestamp
+                        try:
+                            dt = datetime.fromisoformat(earliest_value.replace("Z", "+00:00"))
+                            return dt.isoformat()
+                        except (ValueError, AttributeError):
+                            pass
+
+        # Fallback if no data found or invalid timestamp - use current time
+        return datetime.now(timezone.utc).isoformat()
 
     def initialOffset(self):
         """Return the initial offset (start time minus 1 microsecond).
@@ -1253,11 +1356,9 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
-        """
+        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it."""
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
-        """
+        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it."""
         pass
