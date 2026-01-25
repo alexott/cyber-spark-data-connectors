@@ -248,27 +248,30 @@ def _is_result_size_limit_error(response):
 
 
 def _execute_logs_query(
-    workspace_id,
     query,
     timespan,
     tenant_id,
     client_id,
     client_secret,
+    workspace_id=None,
+    resource_id=None,
     max_retries=5,
     initial_backoff=1.0,
     azure_cloud=None,
 ):
-    """Execute a KQL query against Azure Monitor Log Analytics workspace.
+    """Execute a KQL query against Azure Monitor workspace or resource.
 
+    Supports querying both Log Analytics workspaces and Azure resources directly.
     Includes retry logic with exponential backoff for HTTP 429 throttling errors.
 
     Args:
-        workspace_id: Log Analytics workspace ID
         query: KQL query to execute (could be just a table name)
         timespan: Time range as tuple (start_time, end_time)
         tenant_id: Azure tenant ID
         client_id: Azure service principal client ID
         client_secret: Azure service principal client secret
+        workspace_id: Log Analytics workspace ID (mutually exclusive with resource_id)
+        resource_id: Azure resource ID (mutually exclusive with workspace_id)
         max_retries: Maximum number of retry attempts for throttling (default: 5)
         initial_backoff: Initial backoff time in seconds (default: 1.0)
         azure_cloud: Azure cloud environment - "public" (default), "government", or "china"
@@ -277,11 +280,18 @@ def _execute_logs_query(
         Query response object from Azure Monitor (may have PARTIAL status)
 
     Raises:
+        ValueError: If both or neither workspace_id and resource_id are provided
         HttpResponseError: If non-retryable HTTP error occurs after all retries
 
     """
     from azure.core.exceptions import HttpResponseError
     from azure.monitor.query import LogsQueryClient
+
+    # Validate that exactly one target is provided
+    if workspace_id and resource_id:
+        raise ValueError("Cannot specify both workspace_id and resource_id")
+    if not workspace_id and not resource_id:
+        raise ValueError("Must specify either workspace_id or resource_id")
 
     # Get cloud-specific configuration (authority and endpoint)
     authority, endpoint = _get_azure_cloud_config(azure_cloud)
@@ -298,14 +308,23 @@ def _execute_logs_query(
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            # Execute query
-            response = client.query_workspace(
-                workspace_id=workspace_id,
-                query=query,
-                timespan=timespan,
-                include_statistics=False,
-                include_visualization=False,
-            )
+            # Execute query using appropriate method
+            if workspace_id:
+                response = client.query_workspace(
+                    workspace_id=workspace_id,
+                    query=query,
+                    timespan=timespan,
+                    include_statistics=False,
+                    include_visualization=False,
+                )
+            else:
+                response = client.query_resource(
+                    resource_id=resource_id,
+                    query=query,
+                    timespan=timespan,
+                    include_statistics=False,
+                    include_visualization=False,
+                )
             # Return response (may be SUCCESS or PARTIAL - caller handles status)
             return response
 
@@ -450,7 +469,9 @@ class AzureMonitorDataSource(DataSource):
     - client_secret: Azure service principal client secret
 
     Read options (batch and streaming):
-    - workspace_id: Log Analytics workspace ID
+    - workspace_id: Log Analytics workspace ID (mutually exclusive with resource_id)
+    - resource_id: Azure resource ID for direct resource query (mutually exclusive with workspace_id)
+                   Format: /subscriptions/{id}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
     - query: KQL query to execute (could be just a table name)
     - tenant_id: Azure tenant ID
     - client_id: Azure service principal ID
@@ -556,6 +577,7 @@ class AzureMonitorDataSource(DataSource):
             Exception: If query fails or returns no data
 
         """
+        from azure.monitor.query import LogsQueryStatus
         from pyspark.sql.types import (
             BooleanType,
             DateType,
@@ -566,16 +588,112 @@ class AzureMonitorDataSource(DataSource):
             StructType,
             TimestampType,
         )
-        from azure.monitor.query import LogsQueryStatus
 
         # Execute query
         response = _execute_logs_query(
-            workspace_id=workspace_id,
             query=query,
             timespan=timespan_value,
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret,
+            workspace_id=workspace_id,
+            azure_cloud=azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            raise Exception(f"Query failed with status: {response.status}")
+
+        # Check if we got any tables
+        if not response.tables or len(response.tables) == 0:
+            raise Exception("Schema inference failed: query returned no tables")
+
+        table = response.tables[0]
+
+        # Check if table has any columns
+        if not table.columns or len(table.columns) == 0:
+            raise Exception("Schema inference failed: query returned no columns")
+
+        # Check if we have any rows to infer types from
+        if not table.rows or len(table.rows) == 0:
+            # No data to infer types from, use string type for all columns
+            fields = [StructField(str(col), StringType(), nullable=True) for col in table.columns]
+            return StructType(fields)
+
+        # Infer schema from actual data in the first row
+        first_row = table.rows[0]
+        fields = []
+
+        for i, column_name in enumerate(table.columns):
+            # Get the value from the first row to infer type
+            value = first_row[i] if i < len(first_row) else None
+
+            # Infer PySpark type from Python type
+            if value is None:
+                # If first value is None, default to StringType
+                spark_type = StringType()
+            elif isinstance(value, bool):
+                # Check bool before int (bool is subclass of int in Python)
+                spark_type = BooleanType()
+            elif isinstance(value, int):
+                spark_type = LongType()
+            elif isinstance(value, float):
+                spark_type = DoubleType()
+            elif isinstance(value, datetime):
+                spark_type = TimestampType()
+            elif isinstance(value, date):
+                spark_type = DateType()
+            elif isinstance(value, str):
+                spark_type = StringType()
+            else:
+                # For any other type, use StringType
+                spark_type = StringType()
+
+            fields.append(StructField(column_name, spark_type, nullable=True))
+
+        return StructType(fields)
+
+    def _infer_schema_from_resource_query(
+        self, resource_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud
+    ):
+        """Helper method to infer schema by executing a resource query and analyzing the first row.
+
+        Args:
+            resource_id: Azure resource ID
+            query: KQL query to execute (should include | take 1 or | limit 1)
+            timespan_value: Time range as tuple (start_time, end_time)
+            tenant_id: Azure tenant ID
+            client_id: Azure service principal client ID
+            client_secret: Azure service principal client secret
+            azure_cloud: Azure cloud environment
+
+        Returns:
+            StructType: The inferred schema
+
+        Raises:
+            Exception: If query fails or returns no data
+
+        """
+        from azure.monitor.query import LogsQueryStatus
+        from pyspark.sql.types import (
+            BooleanType,
+            DateType,
+            DoubleType,
+            LongType,
+            StringType,
+            StructField,
+            StructType,
+            TimestampType,
+        )
+
+        # Execute query against resource
+        response = _execute_logs_query(
+            query=query,
+            timespan=timespan_value,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            resource_id=resource_id,
             azure_cloud=azure_cloud,
         )
 
@@ -635,6 +753,8 @@ class AzureMonitorDataSource(DataSource):
     def _infer_read_schema(self):
         """Infer schema by executing a sample query with limit 1.
 
+        Supports both workspace and resource queries.
+
         Returns:
             StructType: The inferred schema
 
@@ -647,12 +767,18 @@ class AzureMonitorDataSource(DataSource):
 
         # Get and validate read-specific options
         workspace_id = self.options.get("workspace_id")
+        resource_id = self.options.get("resource_id")
         query = self.options.get("query")
         timespan = self.options.get("timespan")
         start_time = self.options.get("start_time")
         end_time = self.options.get("end_time")
 
-        assert workspace_id, "workspace_id is required"
+        # Validate that exactly one of workspace_id or resource_id is provided
+        if workspace_id and resource_id:
+            raise ValueError("Cannot specify both workspace_id and resource_id. Use one or the other.")
+        if not workspace_id and not resource_id:
+            raise ValueError("Must specify either workspace_id or resource_id")
+
         assert query, "query is required"
 
         # Parse time range using module-level function
@@ -663,16 +789,27 @@ class AzureMonitorDataSource(DataSource):
         if not any(keyword in sample_query.lower() for keyword in ["| take ", "| limit "]):
             sample_query = f"{sample_query} | take 1"
 
-        # Use helper method to infer schema (auth options from self)
-        return self._infer_schema_from_query(
-            workspace_id=workspace_id,
-            query=sample_query,
-            timespan_value=timespan_value,
-            tenant_id=self.tenant_id,
-            client_id=self.client_id,
-            client_secret=self.client_secret,
-            azure_cloud=self.azure_cloud,
-        )
+        # Use appropriate helper method based on query target
+        if workspace_id:
+            return self._infer_schema_from_query(
+                workspace_id=workspace_id,
+                query=sample_query,
+                timespan_value=timespan_value,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
+            )
+        else:
+            return self._infer_schema_from_resource_query(
+                resource_id=resource_id,
+                query=sample_query,
+                timespan_value=timespan_value,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
+            )
 
     def list_tables(self):
         """List all tables in the Log Analytics workspace.
@@ -703,12 +840,12 @@ class AzureMonitorDataSource(DataSource):
         from azure.monitor.query import LogsQueryStatus
 
         response = _execute_logs_query(
-            workspace_id=workspace_id,
             query=list_tables_query,
             timespan=None,
             tenant_id=self.tenant_id,
             client_id=self.client_id,
             client_secret=self.client_secret,
+            workspace_id=workspace_id,
             azure_cloud=self.azure_cloud,
         )
 
@@ -811,16 +948,17 @@ class MicrosoftSentinelDataSource(AzureMonitorDataSource):
 
 
 class AzureMonitorReader:
-    """Base reader class for Azure Monitor / Log Analytics workspaces.
+    """Base reader class for Azure Monitor / Log Analytics workspaces and direct resource queries.
 
     Shared read logic for batch and streaming reads.
+    Supports both workspace-based queries (via workspace_id) and direct resource queries (via resource_id).
     """
 
     def __init__(self, options, schema: StructType):
         """Initialize the reader with options and schema.
 
         Args:
-            options: Dictionary of options containing workspace_id, query, credentials
+            options: Dictionary of options containing workspace_id/resource_id, query, credentials
             schema: StructType schema (provided by DataSource.schema())
 
         """
@@ -836,9 +974,15 @@ class AzureMonitorReader:
 
         # Extract and validate read-specific options
         self.workspace_id = options.get("workspace_id")
+        self.resource_id = options.get("resource_id")
         self.query = options.get("query")
 
-        assert self.workspace_id, "workspace_id is required"
+        # Validate that exactly one of workspace_id or resource_id is provided
+        if self.workspace_id and self.resource_id:
+            raise ValueError("Cannot specify both workspace_id and resource_id. Use one or the other.")
+        if not self.workspace_id and not self.resource_id:
+            raise ValueError("Must specify either workspace_id or resource_id")
+
         assert self.query, "query is required"
 
         # Retry and subdivision options
@@ -853,6 +997,7 @@ class AzureMonitorReader:
         """Read data for the given partition time range.
 
         Handles throttling with retries and large result sets by subdividing time ranges.
+        Automatically uses the correct query method based on workspace_id or resource_id.
 
         Args:
             partition: TimeRangePartition containing start_time and end_time
@@ -867,14 +1012,15 @@ class AzureMonitorReader:
         # Use partition's time range
         timespan_value = (partition.start_time, partition.end_time)
 
-        # Execute query using module-level function (includes retry logic for 429)
+        # Execute query using unified function (handles both workspace and resource)
         response = _execute_logs_query(
-            workspace_id=self.workspace_id,
             query=self.query,
             timespan=timespan_value,
             tenant_id=self.tenant_id,
             client_id=self.client_id,
             client_secret=self.client_secret,
+            workspace_id=self.workspace_id,
+            resource_id=self.resource_id,
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,
@@ -1153,6 +1299,7 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
         """
         from datetime import datetime, timezone
+
         from azure.monitor.query import LogsQueryStatus
 
         # Construct query to find earliest timestamp
@@ -1161,12 +1308,13 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
         # Execute query without timespan restriction to find absolute earliest
         response = _execute_logs_query(
-            workspace_id=self.workspace_id,
             query=earliest_query,
             timespan=None,  # No time restriction
             tenant_id=self.tenant_id,
             client_id=self.client_id,
             client_secret=self.client_secret,
+            workspace_id=self.workspace_id,
+            resource_id=self.resource_id,
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,

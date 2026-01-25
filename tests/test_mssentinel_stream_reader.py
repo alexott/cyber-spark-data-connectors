@@ -341,7 +341,7 @@ class TestAzureMonitorStreamReader:
             assert "earliest" in str(e)
 
     def test_stream_reader_missing_workspace_id(self, basic_schema):
-        """Test stream reader fails without workspace_id."""
+        """Test stream reader fails without workspace_id or resource_id."""
         options = {
             "query": "AzureActivity",
             "start_time": "2024-01-01T00:00:00Z",
@@ -350,7 +350,7 @@ class TestAzureMonitorStreamReader:
             "client_secret": "test-secret",
         }
 
-        with pytest.raises(AssertionError, match="workspace_id is required"):
+        with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
             AzureMonitorStreamReader(options, basic_schema)
 
     def test_stream_reader_missing_query(self, basic_schema):
