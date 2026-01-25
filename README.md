@@ -431,7 +431,8 @@ df.show()
 
 Supported read options:
 
-- `workspace_id` (string, required) - Log Analytics workspace ID
+- `workspace_id` (string, required for workspace queries) - Log Analytics workspace ID (mutually exclusive with `resource_id`)
+- `resource_id` (string, required for direct resource queries) - Azure resource ID in format `/subscriptions/{id}/resourceGroups/{rg}/providers/{provider}/{type}/{name}` (mutually exclusive with `workspace_id`)
 - `query` (string, required) - KQL query to execute (could be just a table name)
 - **Time range options (choose one approach):**
   - `timespan` (string) - Time range in ISO 8601 duration format (e.g., "P1D" = 1 day, "PT1H" = 1 hour, "P7D" = 7 days)
@@ -479,6 +480,38 @@ read_options = {
     "azure_cloud": "china",  # Uses login.chinacloudapi.cn and api.loganalytics.azure.cn
 }
 ```
+
+**Direct Resource Query (without Log Analytics Workspace):**
+
+You can query logs directly from Azure resources without requiring a Log Analytics workspace. Instead of specifying `workspace_id`, provide the `resource_id` of the resource you want to query:
+
+```python
+# Query logs from an Azure Storage Account
+read_options = {
+    "resource_id": "/subscriptions/{subscription-id}/resourceGroups/{rg-name}/providers/Microsoft.Storage/storageAccounts/{storage-name}",
+    "query": "StorageBlobLogs | where TimeGenerated > ago(1d) | take 100",
+    "timespan": "P1D",
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+# Query logs from Azure Event Grid
+read_options = {
+    "resource_id": "/subscriptions/{subscription-id}/resourceGroups/{rg-name}/providers/Microsoft.EventGrid/topics/{topic-name}",
+    "query": "AzureDiagnostics | take 100",
+    "start_time": "2024-01-01T00:00:00Z",
+    "tenant_id": tenant_id,
+    "client_id": client_id,
+    "client_secret": client_secret,
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
+```
+
+**Note**: `workspace_id` and `resource_id` are mutually exclusive - use one or the other, not both. All other options (time ranges, partitioning, retries, etc.) work the same way for both workspace and resource queries.
 
 **Automatic Throttling and Large Result Set Handling:**
 
