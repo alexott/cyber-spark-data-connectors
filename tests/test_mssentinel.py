@@ -164,6 +164,17 @@ class TestAzureMonitorWriter:
         assert writer.databricks_credential == "my-azure-credential"
         assert writer.azure_default_credential is False
 
+    def test_init_with_empty_databricks_credential_fails(self):
+        """Test that empty databricks_credential is rejected."""
+        options = {
+            "dce": "https://test.monitor.azure.com",
+            "dcr_id": "dcr-test",
+            "dcs": "stream",
+            "databricks_credential": "",
+        }
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchWriter(options)
+
     def test_init_with_azure_default_credential(self):
         """Test initialization with azure_default_credential."""
         options = {

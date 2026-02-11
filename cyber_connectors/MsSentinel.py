@@ -587,6 +587,11 @@ class AzureMonitorDataSource(DataSource):
 
         # Extract authentication options (centralized for easier extension)
         # Validation is deferred to _validate_auth() when auth is actually needed
+        # 1. Databricks Unity Catalog service credential
+        self.databricks_credential = self.options.get("databricks_credential")
+        # 2. Azure DefaultAzureCredential (for managed identity, attached credential, etc.)
+        self.azure_default_credential = self.options.get("azure_default_credential", "false").lower() == "true"
+        # 3. Service Principal credentials
         self.tenant_id = self.options.get("tenant_id")
         self.client_id = self.options.get("client_id")
         self.client_secret = self.options.get("client_secret")
@@ -601,9 +606,16 @@ class AzureMonitorDataSource(DataSource):
             AssertionError: If required auth options are missing or empty
 
         """
-        assert self.tenant_id, "tenant_id is required"
-        assert self.client_id, "client_id is required"
-        assert self.client_secret, "client_secret is required"
+        # Validate authentication: one of the three methods must be configured
+        has_sp_auth = self.tenant_id and self.client_id and self.client_secret
+        has_databricks_credential = bool(self.databricks_credential)
+        has_default_credential = self.azure_default_credential
+
+        if not (has_sp_auth or has_databricks_credential or has_default_credential):
+            raise AssertionError(
+                "Authentication required: provide either 'databricks_credential', "
+                "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
+            )
 
     @classmethod
     def name(cls):
@@ -666,8 +678,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=client_secret,
             workspace_id=workspace_id,
             azure_cloud=azure_cloud,
-            databricks_credential=databricks_credential,
-            azure_default_credential=azure_default_credential,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -765,6 +777,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=client_secret,
             resource_id=resource_id,
             azure_cloud=azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -917,6 +931,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=self.client_secret,
             workspace_id=workspace_id,
             azure_cloud=self.azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -1045,7 +1061,7 @@ class AzureMonitorReader:
 
         # Validate authentication: one of the three methods must be configured
         has_sp_auth = self.tenant_id and self.client_id and self.client_secret
-        has_databricks_credential = self.databricks_credential is not None
+        has_databricks_credential = bool(self.databricks_credential)
         has_default_credential = self.azure_default_credential
 
         if not (has_sp_auth or has_databricks_credential or has_default_credential):
@@ -1402,6 +1418,8 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -1539,7 +1557,7 @@ class AzureMonitorWriter:
 
         # Validate authentication: one of the three methods must be configured
         has_sp_auth = self.tenant_id and self.client_id and self.client_secret
-        has_databricks_credential = self.databricks_credential is not None
+        has_databricks_credential = bool(self.databricks_credential)
         has_default_credential = self.azure_default_credential
 
         if not (has_sp_auth or has_databricks_credential or has_default_credential):
