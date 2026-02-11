@@ -296,10 +296,18 @@ This data source supports both reading from and writing to [Microsoft Sentinel](
 
 #### Authentication Requirements
 
-This connector uses Azure Service Principal Client ID/Secret for authentication.
+This connector supports three authentication methods (in order of precedence):
 
-The service principal needs the following permissions:
+1. **Databricks Unity Catalog Service Credential** (`databricks_credential`): Use a named service credential configured in Unity Catalog. This is the recommended approach when running on Databricks with Unity Catalog enabled. See [Unity Catalog Service Credentials documentation](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/use-service-credentials).  
 
+> [!WARNING]
+> Please note that due to the technical limitations, UC service credentials could be used only on worker nodes, so schema inference will fail with errors.  For such cases, provide explicit schema when reading data.
+
+2. **Azure DefaultAzureCredential** (`azure_default_credential`): Use Azure's DefaultAzureCredential, which automatically discovers credentials from the environment (managed identity, environment variables, etc.). This is useful when running on compute with attached service credentials or managed identity.
+
+3. **Azure Service Principal** (`tenant_id`, `client_id`, `client_secret`): Use explicit service principal credentials. This is the traditional approach and requires all three parameters.
+
+The service principal (or managed identity) needs the following permissions:
 - For reading: **Log Analytics Reader** role on the Log Analytics workspace
 - For writing: **Monitoring Metrics Publisher** role on the DCE and DCR
 
@@ -374,6 +382,11 @@ Supported write options:
 - `dce` (string, required) - URL of the Data Collection Endpoint.
 - `dcr_id` (string, required) - ID of Data Collection Rule.
 - `dcs` (string, required) - name of custom table created in the Log Analytics Workspace.
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment ("public", "government", or "china")
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to MS Sentinel.
 
 #### Reading from Microsoft Sentinel / Azure Monitor
@@ -439,6 +452,14 @@ Supported read options:
   - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
   - `end_time` (string, optional) - End time in ISO 8601 format. Only valid when `start_time` is specified
   - **Note**: `timespan` and `start_time/end_time` are mutually exclusive - choose one approach
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment. Valid values:
+  - `"public"` - Azure Public Cloud (default)
+  - `"government"` - Azure Government (GovCloud)
+  - `"china"` - Azure China (21Vianet)
 - `num_partitions` (int, optional, default: 1) - Number of partitions for reading data
 - `inferSchema` (bool, optional, default: true) - if we do the schema inference by sampling result.
 - `max_retries` (int, optional, default: 5) - Maximum retry attempts for HTTP 429 throttling errors
@@ -456,6 +477,40 @@ query = "SecurityAlert | where TimeGenerated > ago(7d) | project TimeGenerated, 
 
 # Custom table query
 query = "MyCustomTable_CL | where TimeGenerated > ago(1h)"
+```
+
+**Authentication Examples:**
+
+Using Unity Catalog Service Credential (recommended for Databricks):
+
+```python
+# Using a named service credential from Unity Catalog
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "timespan": "P1D",
+    "databricks_credential": "my-azure-credential",  # Name of UC service credential
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
+```
+
+Using Azure DefaultAzureCredential (for managed identity or attached credentials):
+
+```python
+# Uses the default credential chain (managed identity, environment, etc.)
+read_options = {
+    "workspace_id": "your-workspace-id",
+    "query": "AzureActivity | take 100",
+    "timespan": "P1D",
+    "azure_default_credential": "true",
+}
+
+df = spark.read.format("azure-monitor") \
+    .options(**read_options) \
+    .load()
 ```
 
 **Azure Sovereign Clouds:**
@@ -567,6 +622,12 @@ Supported streaming read options:
   - ISO 8601 timestamp (e.g., "2024-01-01T00:00:00Z") - Start from a specific time
 - `timestamp_column` (string, optional, default: "TimeGenerated") - Column name to use for timestamp when `start_time="earliest"` is specified
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
+- **Authentication options (choose one):**
+  - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
+  - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
+  - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
+- `azure_cloud` (string, optional, default: "public") - Azure cloud environment ("public", "government", or "china")
+- `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints
 
 **Important notes for streaming:**
 

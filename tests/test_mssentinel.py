@@ -129,32 +129,19 @@ class TestAzureMonitorWriter:
         with pytest.raises(AssertionError):
             AzureMonitorBatchWriter(options)
 
-    def test_init_missing_tenant_id(self):
-        """Test that missing tenant ID raises assertion error."""
+    def test_init_missing_authentication(self):
+        """Test that missing authentication raises assertion error."""
         options = {
             "dce": "https://test.monitor.azure.com",
             "dcr_id": "dcr-test",
             "dcs": "stream",
-            "client_id": "client",
-            "client_secret": "secret",
         }
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorBatchWriter(options)
 
-    def test_init_missing_client_id(self):
-        """Test that missing client ID raises assertion error."""
-        options = {
-            "dce": "https://test.monitor.azure.com",
-            "dcr_id": "dcr-test",
-            "dcs": "stream",
-            "tenant_id": "tenant",
-            "client_secret": "secret",
-        }
-        with pytest.raises(AssertionError):
-            AzureMonitorBatchWriter(options)
-
-    def test_init_missing_client_secret(self):
-        """Test that missing client secret raises assertion error."""
+    def test_init_partial_sp_credentials_fails(self):
+        """Test that partial SP credentials fail."""
+        # Only tenant_id and client_id provided
         options = {
             "dce": "https://test.monitor.azure.com",
             "dcr_id": "dcr-test",
@@ -162,8 +149,43 @@ class TestAzureMonitorWriter:
             "tenant_id": "tenant",
             "client_id": "client",
         }
-        with pytest.raises(AssertionError):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorBatchWriter(options)
+
+    def test_init_with_databricks_credential(self):
+        """Test initialization with databricks_credential."""
+        options = {
+            "dce": "https://test.monitor.azure.com",
+            "dcr_id": "dcr-test",
+            "dcs": "stream",
+            "databricks_credential": "my-azure-credential",
+        }
+        writer = AzureMonitorBatchWriter(options)
+        assert writer.databricks_credential == "my-azure-credential"
+        assert writer.azure_default_credential is False
+
+    def test_init_with_empty_databricks_credential_fails(self):
+        """Test that empty databricks_credential is rejected."""
+        options = {
+            "dce": "https://test.monitor.azure.com",
+            "dcr_id": "dcr-test",
+            "dcs": "stream",
+            "databricks_credential": "",
+        }
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchWriter(options)
+
+    def test_init_with_azure_default_credential(self):
+        """Test initialization with azure_default_credential."""
+        options = {
+            "dce": "https://test.monitor.azure.com",
+            "dcr_id": "dcr-test",
+            "dcs": "stream",
+            "azure_default_credential": "true",
+        }
+        writer = AzureMonitorBatchWriter(options)
+        assert writer.azure_default_credential is True
+        assert writer.databricks_credential is None
 
     def test_init_with_custom_batch_size(self):
         """Test initialization with custom batch size."""
@@ -292,7 +314,9 @@ class TestAzureMonitorWriter:
             writer.write(iter(rows))
 
             # Check that ClientSecretCredential was called with correct parameters
-            mock_credential.assert_called_once_with("tenant-id-12345", "client-id-12345", "client-secret-12345")
+            mock_credential.assert_called_once_with(
+                tenant_id="tenant-id-12345", client_id="client-id-12345", client_secret="client-secret-12345"
+            )
 
             # Check that LogsIngestionClient was created with correct parameters
             mock_logs_client_class.assert_called_once_with(

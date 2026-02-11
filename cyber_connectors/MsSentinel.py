@@ -82,6 +82,64 @@ def _create_azure_credential(tenant_id, client_id, client_secret, authority=None
     return ClientSecretCredential(tenant_id=tenant_id, client_id=client_id, client_secret=client_secret)
 
 
+def _get_credential_from_options(
+    tenant_id=None,
+    client_id=None,
+    client_secret=None,
+    databricks_credential=None,
+    azure_default_credential=False,
+    authority=None,
+):
+    """Get Azure credential based on provided options.
+
+    Supports three authentication methods (in order of precedence):
+    1. Databricks Unity Catalog service credential (if databricks_credential is specified)
+    2. Azure DefaultAzureCredential (if azure_default_credential is True)
+    3. Azure Service Principal (if tenant_id, client_id, client_secret are provided)
+
+    Args:
+        tenant_id: Azure tenant ID (for Service Principal auth)
+        client_id: Azure service principal client ID (for Service Principal auth)
+        client_secret: Azure service principal client secret (for Service Principal auth)
+        databricks_credential: Name of Unity Catalog service credential to use
+        azure_default_credential: If True, use DefaultAzureCredential
+        authority: Optional authority host URL for sovereign clouds
+
+    Returns:
+        Azure credential object
+
+    Raises:
+        AssertionError: If no valid authentication method is configured
+
+    """
+    # Priority 1: Databricks Unity Catalog service credential
+    if databricks_credential:
+        import databricks.service_credentials
+
+        return databricks.service_credentials.getServiceCredentialsProvider(databricks_credential)
+
+    # Priority 2: Azure DefaultAzureCredential (for managed identity, etc.)
+    if azure_default_credential:
+        from azure.identity import DefaultAzureCredential
+
+        if authority:
+            return DefaultAzureCredential(authority=authority)
+        return DefaultAzureCredential()
+
+    # Priority 3: Service Principal (requires all three parameters)
+    assert tenant_id is not None, (
+        "tenant_id is required when not using databricks_credential or azure_default_credential"
+    )
+    assert client_id is not None, (
+        "client_id is required when not using databricks_credential or azure_default_credential"
+    )
+    assert client_secret is not None, (
+        "client_secret is required when not using databricks_credential or azure_default_credential"
+    )
+
+    return _create_azure_credential(tenant_id, client_id, client_secret, authority=authority)
+
+
 def _parse_time_range(timespan=None, start_time=None, end_time=None):
     """Parse time range from timespan or start_time/end_time options.
 
@@ -250,14 +308,16 @@ def _is_result_size_limit_error(response):
 def _execute_logs_query(
     query,
     timespan,
-    tenant_id,
-    client_id,
-    client_secret,
+    tenant_id=None,
+    client_id=None,
+    client_secret=None,
     workspace_id=None,
     resource_id=None,
     max_retries=5,
     initial_backoff=1.0,
     azure_cloud=None,
+    databricks_credential=None,
+    azure_default_credential=False,
 ):
     """Execute a KQL query against Azure Monitor workspace or resource.
 
@@ -267,14 +327,16 @@ def _execute_logs_query(
     Args:
         query: KQL query to execute (could be just a table name)
         timespan: Time range as tuple (start_time, end_time)
-        tenant_id: Azure tenant ID
-        client_id: Azure service principal client ID
-        client_secret: Azure service principal client secret
+        tenant_id: Azure tenant ID (for Service Principal auth)
+        client_id: Azure service principal client ID (for Service Principal auth)
+        client_secret: Azure service principal client secret (for Service Principal auth)
         workspace_id: Log Analytics workspace ID (mutually exclusive with resource_id)
         resource_id: Azure resource ID (mutually exclusive with workspace_id)
         max_retries: Maximum number of retry attempts for throttling (default: 5)
         initial_backoff: Initial backoff time in seconds (default: 1.0)
         azure_cloud: Azure cloud environment - "public" (default), "government", or "china"
+        databricks_credential: Name of Unity Catalog service credential to use
+        azure_default_credential: If True, use Azure DefaultAzureCredential
 
     Returns:
         Query response object from Azure Monitor (may have PARTIAL status)
@@ -296,8 +358,15 @@ def _execute_logs_query(
     # Get cloud-specific configuration (authority and endpoint)
     authority, endpoint = _get_azure_cloud_config(azure_cloud)
 
-    # Create authenticated client with cloud-specific authority
-    credential = _create_azure_credential(tenant_id, client_id, client_secret, authority=authority)
+    # Create authenticated client using appropriate credential method
+    credential = _get_credential_from_options(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+        databricks_credential=databricks_credential,
+        azure_default_credential=azure_default_credential,
+        authority=authority,
+    )
 
     # Create LogsQueryClient with cloud-specific endpoint
     if endpoint:
@@ -518,6 +587,11 @@ class AzureMonitorDataSource(DataSource):
 
         # Extract authentication options (centralized for easier extension)
         # Validation is deferred to _validate_auth() when auth is actually needed
+        # 1. Databricks Unity Catalog service credential
+        self.databricks_credential = self.options.get("databricks_credential")
+        # 2. Azure DefaultAzureCredential (for managed identity, attached credential, etc.)
+        self.azure_default_credential = self.options.get("azure_default_credential", "false").lower() == "true"
+        # 3. Service Principal credentials
         self.tenant_id = self.options.get("tenant_id")
         self.client_id = self.options.get("client_id")
         self.client_secret = self.options.get("client_secret")
@@ -532,9 +606,16 @@ class AzureMonitorDataSource(DataSource):
             AssertionError: If required auth options are missing or empty
 
         """
-        assert self.tenant_id, "tenant_id is required"
-        assert self.client_id, "client_id is required"
-        assert self.client_secret, "client_secret is required"
+        # Validate authentication: one of the three methods must be configured
+        has_sp_auth = self.tenant_id and self.client_id and self.client_secret
+        has_databricks_credential = bool(self.databricks_credential)
+        has_default_credential = self.azure_default_credential
+
+        if not (has_sp_auth or has_databricks_credential or has_default_credential):
+            raise AssertionError(
+                "Authentication required: provide either 'databricks_credential', "
+                "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
+            )
 
     @classmethod
     def name(cls):
@@ -589,7 +670,6 @@ class AzureMonitorDataSource(DataSource):
             TimestampType,
         )
 
-        # Execute query
         response = _execute_logs_query(
             query=query,
             timespan=timespan_value,
@@ -598,6 +678,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=client_secret,
             workspace_id=workspace_id,
             azure_cloud=azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -695,6 +777,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=client_secret,
             resource_id=resource_id,
             azure_cloud=azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -847,6 +931,8 @@ class AzureMonitorDataSource(DataSource):
             client_secret=self.client_secret,
             workspace_id=workspace_id,
             azure_cloud=self.azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -962,15 +1048,27 @@ class AzureMonitorReader:
             schema: StructType schema (provided by DataSource.schema())
 
         """
-        # Extract and validate authentication options
+        # Authentication options (three methods supported)
+        # 1. Databricks Unity Catalog service credential
+        self.databricks_credential = options.get("databricks_credential")
+        # 2. Azure DefaultAzureCredential (for managed identity, attached credential, etc.)
+        self.azure_default_credential = options.get("azure_default_credential", "false").lower() == "true"
+        # 3. Service Principal credentials
         self.tenant_id = options.get("tenant_id")
         self.client_id = options.get("client_id")
         self.client_secret = options.get("client_secret")
         self.azure_cloud = options.get("azure_cloud", "public")
 
-        assert self.tenant_id, "tenant_id is required"
-        assert self.client_id, "client_id is required"
-        assert self.client_secret, "client_secret is required"
+        # Validate authentication: one of the three methods must be configured
+        has_sp_auth = self.tenant_id and self.client_id and self.client_secret
+        has_databricks_credential = bool(self.databricks_credential)
+        has_default_credential = self.azure_default_credential
+
+        if not (has_sp_auth or has_databricks_credential or has_default_credential):
+            raise AssertionError(
+                "Authentication required: provide either 'databricks_credential', "
+                "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
+            )
 
         # Extract and validate read-specific options
         self.workspace_id = options.get("workspace_id")
@@ -1024,6 +1122,8 @@ class AzureMonitorReader:
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Handle PARTIAL or FAILURE status - check if due to size limits
@@ -1318,6 +1418,8 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
         )
 
         # Check query status
@@ -1440,14 +1542,29 @@ class AzureMonitorWriter:
     def __init__(self, options):
         self.options = options
 
-        # Extract and validate authentication options
+        # Authentication options (three methods supported)
+        # 1. Databricks Unity Catalog service credential
+        self.databricks_credential = self.options.get("databricks_credential")
+        # 2. Azure DefaultAzureCredential (for managed identity, attached credential, etc.)
+        self.azure_default_credential = self.options.get("azure_default_credential", "false").lower() == "true"
+        # 3. Service Principal credentials
         self.tenant_id = self.options.get("tenant_id")
         self.client_id = self.options.get("client_id")
         self.client_secret = self.options.get("client_secret")
 
-        assert self.tenant_id, "tenant_id is required"
-        assert self.client_id, "client_id is required"
-        assert self.client_secret, "client_secret is required"
+        # Azure cloud environment: "public" (default), "government", or "china"
+        self.azure_cloud = self.options.get("azure_cloud", "public")
+
+        # Validate authentication: one of the three methods must be configured
+        has_sp_auth = self.tenant_id and self.client_id and self.client_secret
+        has_databricks_credential = bool(self.databricks_credential)
+        has_default_credential = self.azure_default_credential
+
+        if not (has_sp_auth or has_databricks_credential or has_default_credential):
+            raise AssertionError(
+                "Authentication required: provide either 'databricks_credential', "
+                "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
+            )
 
         # Extract and validate write-specific options
         self.dce = self.options.get("dce")  # data_collection_endpoint
@@ -1468,12 +1585,22 @@ class AzureMonitorWriter:
         """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
         import json
 
-        from azure.identity import ClientSecretCredential
         from azure.monitor.ingestion import LogsIngestionClient
         from pyspark import TaskContext
         # from azure.core.exceptions import HttpResponseError
 
-        credential = ClientSecretCredential(self.tenant_id, self.client_id, self.client_secret)
+        # Get cloud-specific configuration (authority)
+        authority, _ = _get_azure_cloud_config(self.azure_cloud)
+
+        # Get credential using the appropriate method
+        credential = _get_credential_from_options(
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            databricks_credential=self.databricks_credential,
+            azure_default_credential=self.azure_default_credential,
+            authority=authority,
+        )
         logs_client = LogsIngestionClient(self.dce, credential)
 
         msgs = []

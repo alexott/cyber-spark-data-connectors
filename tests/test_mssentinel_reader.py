@@ -445,34 +445,20 @@ class TestAzureMonitorBatchReader:
         with pytest.raises(Exception, match="Either 'timespan' or 'start_time' must be provided"):
             AzureMonitorBatchReader(options, basic_schema)
 
-    def test_reader_missing_tenant_id(self, basic_schema):
-        """Test reader fails without tenant_id."""
+    def test_reader_missing_authentication(self, basic_schema):
+        """Test reader fails without any authentication method."""
         options = {
             "workspace_id": "test-workspace-id",
             "query": "AzureActivity | take 5",
             "timespan": "P1D",
-            "client_id": "test-client",
-            "client_secret": "test-secret",
         }
 
-        with pytest.raises(AssertionError, match="tenant_id is required"):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorBatchReader(options, basic_schema)
 
-    def test_reader_missing_client_id(self, basic_schema):
-        """Test reader fails without client_id."""
-        options = {
-            "workspace_id": "test-workspace-id",
-            "query": "AzureActivity | take 5",
-            "timespan": "P1D",
-            "tenant_id": "test-tenant",
-            "client_secret": "test-secret",
-        }
-
-        with pytest.raises(AssertionError, match="client_id is required"):
-            AzureMonitorBatchReader(options, basic_schema)
-
-    def test_reader_missing_client_secret(self, basic_schema):
-        """Test reader fails without client_secret."""
+    def test_reader_partial_sp_credentials(self, basic_schema):
+        """Test reader fails with partial SP credentials."""
+        # Only tenant_id and client_id provided
         options = {
             "workspace_id": "test-workspace-id",
             "query": "AzureActivity | take 5",
@@ -481,7 +467,7 @@ class TestAzureMonitorBatchReader:
             "client_id": "test-client",
         }
 
-        with pytest.raises(AssertionError, match="client_secret is required"):
+        with pytest.raises(AssertionError, match="Authentication required"):
             AzureMonitorBatchReader(options, basic_schema)
 
     def test_reader_missing_time_range(self, basic_schema):
@@ -1833,6 +1819,268 @@ class TestTimeRangeSubdivision:
         assert reader.max_retries == 10
         assert reader.initial_backoff == 2.5
         assert reader.min_partition_seconds == 120
+
+
+class TestAlternativeAuthentication:
+    """Test alternative authentication methods (Databricks credential, DefaultAzureCredential)."""
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    def test_reader_with_databricks_credential(self, basic_schema):
+        """Test reader initialization with databricks_credential."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "databricks_credential": "my-azure-credential",
+        }
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        assert reader.databricks_credential == "my-azure-credential"
+        assert reader.azure_default_credential is False
+        assert reader.tenant_id is None
+        assert reader.client_id is None
+        assert reader.client_secret is None
+
+    def test_reader_with_azure_default_credential(self, basic_schema):
+        """Test reader initialization with azure_default_credential."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "azure_default_credential": "true",
+        }
+
+        reader = AzureMonitorBatchReader(options, basic_schema)
+        assert reader.databricks_credential is None
+        assert reader.azure_default_credential is True
+        assert reader.tenant_id is None
+        assert reader.client_id is None
+        assert reader.client_secret is None
+
+    def test_reader_azure_default_credential_false(self, basic_schema):
+        """Test reader with azure_default_credential=false still requires SP credentials."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "azure_default_credential": "false",
+        }
+
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+    def test_reader_no_authentication_fails(self, basic_schema):
+        """Test reader fails without any authentication method."""
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+        }
+
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+    def test_reader_partial_sp_credentials_fails(self, basic_schema):
+        """Test reader fails with partial SP credentials."""
+        # Only tenant_id provided
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+        }
+
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+        # tenant_id and client_id provided
+        options["client_id"] = "test-client"
+        with pytest.raises(AssertionError, match="Authentication required"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    def test_execute_query_with_databricks_credential(self, mock_client):
+        """Test _execute_logs_query with databricks_credential."""
+        import sys
+
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        # Mock the databricks.service_credentials module
+        mock_credential = Mock()
+        mock_service_credentials = Mock()
+        mock_service_credentials.getServiceCredentialsProvider.return_value = mock_credential
+
+        # Create mock databricks module hierarchy
+        mock_databricks = Mock()
+        mock_databricks.service_credentials = mock_service_credentials
+
+        # Inject mock module into sys.modules
+        with patch.dict(sys.modules, {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}):
+            mock_response = Mock()
+            mock_response.status = LogsQueryStatus.SUCCESS
+            mock_response.tables = []
+
+            mock_client_instance = Mock()
+            mock_client_instance.query_workspace.return_value = mock_response
+            mock_client.return_value = mock_client_instance
+
+            result = _execute_logs_query(
+                workspace_id="test",
+                query="test",
+                timespan=(datetime.now(), datetime.now()),
+                databricks_credential="my-azure-credential",
+            )
+
+            # Verify Databricks credential was used
+            mock_service_credentials.getServiceCredentialsProvider.assert_called_once_with("my-azure-credential")
+            # Verify LogsQueryClient was created with the Databricks credential
+            mock_client.assert_called_once_with(mock_credential)
+            assert result.status == LogsQueryStatus.SUCCESS
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    def test_execute_query_with_default_credential(self, mock_client):
+        """Test _execute_logs_query with azure_default_credential."""
+        import azure.identity
+
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        # Patch at the module level to affect the inline import
+        with patch.object(azure.identity, "DefaultAzureCredential") as mock_default_credential:
+            mock_credential = Mock()
+            mock_default_credential.return_value = mock_credential
+
+            result = _execute_logs_query(
+                workspace_id="test",
+                query="test",
+                timespan=(datetime.now(), datetime.now()),
+                azure_default_credential=True,
+            )
+
+            # Verify DefaultAzureCredential was used
+            mock_default_credential.assert_called_once()
+            # Verify LogsQueryClient was created with the DefaultAzureCredential
+            mock_client.assert_called_once_with(mock_credential)
+            assert result.status == LogsQueryStatus.SUCCESS
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.DefaultAzureCredential")
+    def test_execute_query_with_default_credential_and_authority(self, mock_default_credential, mock_client):
+        """Test _execute_logs_query with azure_default_credential in government cloud."""
+        from azure.identity import AzureAuthorityHosts
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_credential = Mock()
+        mock_default_credential.return_value = mock_credential
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        result = _execute_logs_query(
+            workspace_id="test",
+            query="test",
+            timespan=(datetime.now(), datetime.now()),
+            azure_default_credential=True,
+            azure_cloud="government",
+        )
+
+        # Verify DefaultAzureCredential was called with authority
+        mock_default_credential.assert_called_once_with(authority=AzureAuthorityHosts.AZURE_GOVERNMENT)
+        assert result.status == LogsQueryStatus.SUCCESS
+
+    def test_get_credential_from_options_priority(self):
+        """Test _get_credential_from_options priority order."""
+        import sys
+
+        from cyber_connectors.MsSentinel import _get_credential_from_options
+
+        # When databricks_credential is set, it takes priority (mock required)
+        mock_credential = Mock()
+        mock_service_credentials = Mock()
+        mock_service_credentials.getServiceCredentialsProvider.return_value = mock_credential
+
+        mock_databricks = Mock()
+        mock_databricks.service_credentials = mock_service_credentials
+
+        with patch.dict(sys.modules, {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}):
+            result = _get_credential_from_options(
+                databricks_credential="my-credential",
+                azure_default_credential=True,  # Also set, but should be ignored
+                tenant_id="test",
+                client_id="test",
+                client_secret="test",
+            )
+
+            mock_service_credentials.getServiceCredentialsProvider.assert_called_once_with("my-credential")
+            assert result == mock_credential
+
+    def test_get_credential_from_options_default_credential(self):
+        """Test _get_credential_from_options with azure_default_credential."""
+        from cyber_connectors.MsSentinel import _get_credential_from_options
+
+        with patch("azure.identity.DefaultAzureCredential") as mock_default:
+            mock_credential = Mock()
+            mock_default.return_value = mock_credential
+
+            result = _get_credential_from_options(
+                azure_default_credential=True,
+                tenant_id="test",  # Also set, but should be ignored
+                client_id="test",
+                client_secret="test",
+            )
+
+            mock_default.assert_called_once()
+            assert result == mock_credential
+
+    def test_get_credential_from_options_service_principal(self):
+        """Test _get_credential_from_options with service principal."""
+        from cyber_connectors.MsSentinel import _get_credential_from_options
+
+        with patch("azure.identity.ClientSecretCredential") as mock_sp:
+            mock_credential = Mock()
+            mock_sp.return_value = mock_credential
+
+            result = _get_credential_from_options(
+                tenant_id="test-tenant",
+                client_id="test-client",
+                client_secret="test-secret",
+            )
+
+            mock_sp.assert_called_once_with(
+                tenant_id="test-tenant",
+                client_id="test-client",
+                client_secret="test-secret",
+            )
+            assert result == mock_credential
+
+    def test_get_credential_from_options_no_auth_fails(self):
+        """Test _get_credential_from_options fails without any auth method."""
+        from cyber_connectors.MsSentinel import _get_credential_from_options
+
+        with pytest.raises(AssertionError, match="tenant_id is required"):
+            _get_credential_from_options()
 
 
 class TestAzureCloudConfiguration:
