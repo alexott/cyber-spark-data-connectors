@@ -306,29 +306,32 @@ def _is_result_size_limit_error(response):
 
 
 def _execute_logs_query(
-    workspace_id,
     query,
     timespan,
     tenant_id=None,
     client_id=None,
     client_secret=None,
+    workspace_id=None,
+    resource_id=None,
     max_retries=5,
     initial_backoff=1.0,
     azure_cloud=None,
     databricks_credential=None,
     azure_default_credential=False,
 ):
-    """Execute a KQL query against Azure Monitor Log Analytics workspace.
+    """Execute a KQL query against Azure Monitor workspace or resource.
 
+    Supports querying both Log Analytics workspaces and Azure resources directly.
     Includes retry logic with exponential backoff for HTTP 429 throttling errors.
 
     Args:
-        workspace_id: Log Analytics workspace ID
-        query: KQL query to execute
+        query: KQL query to execute (could be just a table name)
         timespan: Time range as tuple (start_time, end_time)
         tenant_id: Azure tenant ID (for Service Principal auth)
         client_id: Azure service principal client ID (for Service Principal auth)
         client_secret: Azure service principal client secret (for Service Principal auth)
+        workspace_id: Log Analytics workspace ID (mutually exclusive with resource_id)
+        resource_id: Azure resource ID (mutually exclusive with workspace_id)
         max_retries: Maximum number of retry attempts for throttling (default: 5)
         initial_backoff: Initial backoff time in seconds (default: 1.0)
         azure_cloud: Azure cloud environment - "public" (default), "government", or "china"
@@ -339,11 +342,18 @@ def _execute_logs_query(
         Query response object from Azure Monitor (may have PARTIAL status)
 
     Raises:
+        ValueError: If both or neither workspace_id and resource_id are provided
         HttpResponseError: If non-retryable HTTP error occurs after all retries
 
     """
     from azure.core.exceptions import HttpResponseError
     from azure.monitor.query import LogsQueryClient
+
+    # Validate that exactly one target is provided
+    if workspace_id and resource_id:
+        raise ValueError("Cannot specify both workspace_id and resource_id")
+    if not workspace_id and not resource_id:
+        raise ValueError("Must specify either workspace_id or resource_id")
 
     # Get cloud-specific configuration (authority and endpoint)
     authority, endpoint = _get_azure_cloud_config(azure_cloud)
@@ -367,14 +377,23 @@ def _execute_logs_query(
     last_exception = None
     for attempt in range(max_retries + 1):
         try:
-            # Execute query
-            response = client.query_workspace(
-                workspace_id=workspace_id,
-                query=query,
-                timespan=timespan,
-                include_statistics=False,
-                include_visualization=False,
-            )
+            # Execute query using appropriate method
+            if workspace_id:
+                response = client.query_workspace(
+                    workspace_id=workspace_id,
+                    query=query,
+                    timespan=timespan,
+                    include_statistics=False,
+                    include_visualization=False,
+                )
+            else:
+                response = client.query_resource(
+                    resource_id=resource_id,
+                    query=query,
+                    timespan=timespan,
+                    include_statistics=False,
+                    include_visualization=False,
+                )
             # Return response (may be SUCCESS or PARTIAL - caller handles status)
             return response
 
@@ -518,10 +537,11 @@ class AzureMonitorDataSource(DataSource):
     - client_id: Azure service principal ID
     - client_secret: Azure service principal client secret
 
-    Read options:
-    - workspace_id: Log Analytics workspace ID
-    - query: KQL query to execute
-    - timespan: Time range for query in ISO 8601 duration format
+    Read options (batch and streaming):
+    - workspace_id: Log Analytics workspace ID (mutually exclusive with resource_id)
+    - resource_id: Azure resource ID for direct resource query (mutually exclusive with workspace_id)
+                   Format: /subscriptions/{id}/resourceGroups/{rg}/providers/{provider}/{type}/{name}
+    - query: KQL query to execute (could be just a table name)
     - tenant_id: Azure tenant ID
     - client_id: Azure service principal ID
     - client_secret: Azure service principal client secret
@@ -530,7 +550,60 @@ class AzureMonitorDataSource(DataSource):
     - max_retries: Maximum retry attempts for throttling (default: 5)
     - initial_backoff: Initial backoff time in seconds for retries (default: 1.0)
     - min_partition_seconds: Minimum partition duration for subdivision (default: 60)
+
+    Batch read options:
+    - timespan: Time range for query in ISO 8601 duration format
+    - start_time: ISO 8601 datetime string (e.g., "2024-01-01T00:00:00Z")
+    - end_time: ISO 8601 datetime string (optional, defaults to now)
+    - num_partitions: Number of time-based partitions for parallel reading (default: 1)
+
+    Streaming read options:
+    - start_time: Starting timestamp for streaming. Supports three formats:
+        * "latest" (default): Start from current time
+        * "earliest": Automatically detect earliest timestamp in data
+        * ISO 8601 timestamp string: Explicit start time
+    - partition_duration: Duration of each partition in seconds (default: 3600 = 1 hour)
+    - timestamp_column: Column name for timestamp when using "earliest" (default: "TimeGenerated")
+
+    Potential issues with "earliest" option:
+    - Performance: For very large tables without time-based indexes, the min(timestamp_column)
+      query may be slow. This is a one-time cost during stream initialization.
+    - Aggregated queries: If the query contains aggregations (e.g., | summarize), "earliest"
+      will find the minimum timestamp from the aggregated results, not from raw data.
+    - Empty tables: If the table has no data, falls back to current timestamp.
     """
+
+    def __init__(self, options):
+        """Initialize AzureMonitorDataSource with options.
+
+        Extracts authentication options. Validation happens lazily when auth is needed.
+        Extend this method to add new auth methods.
+
+        Args:
+            options: Dictionary of options from Spark
+
+        """
+        super().__init__(options)
+
+        # Extract authentication options (centralized for easier extension)
+        # Validation is deferred to _validate_auth() when auth is actually needed
+        self.tenant_id = self.options.get("tenant_id")
+        self.client_id = self.options.get("client_id")
+        self.client_secret = self.options.get("client_secret")
+        self.azure_cloud = self.options.get("azure_cloud", "public")
+
+    def _validate_auth(self):
+        """Validate that authentication options are present and non-empty.
+
+        Called by methods that require authentication.
+
+        Raises:
+            AssertionError: If required auth options are missing or empty
+
+        """
+        assert self.tenant_id, "tenant_id is required"
+        assert self.client_id, "client_id is required"
+        assert self.client_secret, "client_secret is required"
 
     @classmethod
     def name(cls):
@@ -552,16 +625,28 @@ class AzureMonitorDataSource(DataSource):
         else:
             raise Exception("Must provide schema if inferSchema is false")
 
-    def _infer_read_schema(self):
-        """Infer schema by executing a sample query with limit 1.
+    def _infer_schema_from_query(
+        self, workspace_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud
+    ):
+        """Helper method to infer schema by executing a query and analyzing the first row.
+
+        Args:
+            workspace_id: Log Analytics workspace ID
+            query: KQL query to execute (should include | take 1 or | limit 1)
+            timespan_value: Time range as tuple (start_time, end_time)
+            tenant_id: Azure tenant ID
+            client_id: Azure service principal client ID
+            client_secret: Azure service principal client secret
+            azure_cloud: Azure cloud environment
 
         Returns:
             StructType: The inferred schema
 
         Raises:
-            Exception: If query returns no results or fails
+            Exception: If query fails or returns no data
 
         """
+        from azure.monitor.query import LogsQueryStatus
         from pyspark.sql.types import (
             BooleanType,
             DateType,
@@ -573,54 +658,13 @@ class AzureMonitorDataSource(DataSource):
             TimestampType,
         )
 
-        # Get read options
-        workspace_id = self.options.get("workspace_id")
-        query = self.options.get("query")
-        timespan = self.options.get("timespan")
-        start_time = self.options.get("start_time")
-        end_time = self.options.get("end_time")
-        azure_cloud = self.options.get("azure_cloud", "public")
-
-        # Authentication options
-        databricks_credential = self.options.get("databricks_credential")
-        azure_default_credential = self.options.get("azure_default_credential", "false").lower() == "true"
-        tenant_id = self.options.get("tenant_id")
-        client_id = self.options.get("client_id")
-        client_secret = self.options.get("client_secret")
-
-        # Validate required options
-        assert workspace_id is not None, "workspace_id is required"
-        assert query is not None, "query is required"
-
-        # Validate authentication: one of the three methods must be configured
-        has_sp_auth = tenant_id and client_id and client_secret
-        has_databricks_credential = databricks_credential is not None
-        has_default_credential = azure_default_credential
-
-        if not (has_sp_auth or has_databricks_credential or has_default_credential):
-            raise AssertionError(
-                "Authentication required: provide either 'databricks_credential', "
-                "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
-            )
-
-        # Parse time range using module-level function
-        timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
-
-        # Modify query to limit results to 1 row
-        sample_query = query.strip()
-        if not any(keyword in sample_query.lower() for keyword in ["| take 1", "| limit 1"]):
-            sample_query = f"{sample_query} | take 1"
-
-        # Execute sample query using module-level function
-        from azure.monitor.query import LogsQueryStatus
-
         response = _execute_logs_query(
-            workspace_id=workspace_id,
-            query=sample_query,
+            query=query,
             timespan=timespan_value,
             tenant_id=tenant_id,
             client_id=client_id,
             client_secret=client_secret,
+            workspace_id=workspace_id,
             azure_cloud=azure_cloud,
             databricks_credential=databricks_credential,
             azure_default_credential=azure_default_credential,
@@ -647,7 +691,6 @@ class AzureMonitorDataSource(DataSource):
             return StructType(fields)
 
         # Infer schema from actual data in the first row
-        # table.columns is always a list of strings (column names)
         first_row = table.rows[0]
         fields = []
 
@@ -680,6 +723,279 @@ class AzureMonitorDataSource(DataSource):
 
         return StructType(fields)
 
+    def _infer_schema_from_resource_query(
+        self, resource_id, query, timespan_value, tenant_id, client_id, client_secret, azure_cloud
+    ):
+        """Helper method to infer schema by executing a resource query and analyzing the first row.
+
+        Args:
+            resource_id: Azure resource ID
+            query: KQL query to execute (should include | take 1 or | limit 1)
+            timespan_value: Time range as tuple (start_time, end_time)
+            tenant_id: Azure tenant ID
+            client_id: Azure service principal client ID
+            client_secret: Azure service principal client secret
+            azure_cloud: Azure cloud environment
+
+        Returns:
+            StructType: The inferred schema
+
+        Raises:
+            Exception: If query fails or returns no data
+
+        """
+        from azure.monitor.query import LogsQueryStatus
+        from pyspark.sql.types import (
+            BooleanType,
+            DateType,
+            DoubleType,
+            LongType,
+            StringType,
+            StructField,
+            StructType,
+            TimestampType,
+        )
+
+        # Execute query against resource
+        response = _execute_logs_query(
+            query=query,
+            timespan=timespan_value,
+            tenant_id=tenant_id,
+            client_id=client_id,
+            client_secret=client_secret,
+            resource_id=resource_id,
+            azure_cloud=azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            raise Exception(f"Query failed with status: {response.status}")
+
+        # Check if we got any tables
+        if not response.tables or len(response.tables) == 0:
+            raise Exception("Schema inference failed: query returned no tables")
+
+        table = response.tables[0]
+
+        # Check if table has any columns
+        if not table.columns or len(table.columns) == 0:
+            raise Exception("Schema inference failed: query returned no columns")
+
+        # Check if we have any rows to infer types from
+        if not table.rows or len(table.rows) == 0:
+            # No data to infer types from, use string type for all columns
+            fields = [StructField(str(col), StringType(), nullable=True) for col in table.columns]
+            return StructType(fields)
+
+        # Infer schema from actual data in the first row
+        first_row = table.rows[0]
+        fields = []
+
+        for i, column_name in enumerate(table.columns):
+            # Get the value from the first row to infer type
+            value = first_row[i] if i < len(first_row) else None
+
+            # Infer PySpark type from Python type
+            if value is None:
+                # If first value is None, default to StringType
+                spark_type = StringType()
+            elif isinstance(value, bool):
+                # Check bool before int (bool is subclass of int in Python)
+                spark_type = BooleanType()
+            elif isinstance(value, int):
+                spark_type = LongType()
+            elif isinstance(value, float):
+                spark_type = DoubleType()
+            elif isinstance(value, datetime):
+                spark_type = TimestampType()
+            elif isinstance(value, date):
+                spark_type = DateType()
+            elif isinstance(value, str):
+                spark_type = StringType()
+            else:
+                # For any other type, use StringType
+                spark_type = StringType()
+
+            fields.append(StructField(column_name, spark_type, nullable=True))
+
+        return StructType(fields)
+
+    def _infer_read_schema(self):
+        """Infer schema by executing a sample query with limit 1.
+
+        Supports both workspace and resource queries.
+
+        Returns:
+            StructType: The inferred schema
+
+        Raises:
+            Exception: If query returns no results or fails
+
+        """
+        # Validate auth options
+        self._validate_auth()
+
+        # Get and validate read-specific options
+        workspace_id = self.options.get("workspace_id")
+        resource_id = self.options.get("resource_id")
+        query = self.options.get("query")
+        timespan = self.options.get("timespan")
+        start_time = self.options.get("start_time")
+        end_time = self.options.get("end_time")
+
+        # Validate that exactly one of workspace_id or resource_id is provided
+        if workspace_id and resource_id:
+            raise ValueError("Cannot specify both workspace_id and resource_id. Use one or the other.")
+        if not workspace_id and not resource_id:
+            raise ValueError("Must specify either workspace_id or resource_id")
+
+        assert query, "query is required"
+
+        # Parse time range using module-level function
+        timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
+
+        # Modify query to limit results to 1 row
+        sample_query = query.strip()
+        if not any(keyword in sample_query.lower() for keyword in ["| take ", "| limit "]):
+            sample_query = f"{sample_query} | take 1"
+
+        # Use appropriate helper method based on query target
+        if workspace_id:
+            return self._infer_schema_from_query(
+                workspace_id=workspace_id,
+                query=sample_query,
+                timespan_value=timespan_value,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
+            )
+        else:
+            return self._infer_schema_from_resource_query(
+                resource_id=resource_id,
+                query=sample_query,
+                timespan_value=timespan_value,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
+            )
+
+    def list_tables(self):
+        """List all tables in the Log Analytics workspace.
+
+        Returns:
+            list[str]: List of table names sorted alphabetically
+
+        Raises:
+            Exception: If workspace_id is not provided, or if query fails
+
+        """
+        # Validate auth options
+        self._validate_auth()
+
+        # Get and validate workspace_id
+        workspace_id = self.options.get("workspace_id")
+        assert workspace_id, "workspace_id is required"
+
+        # KQL query to list all distinct table names
+        list_tables_query = """
+        search *
+        | distinct $table
+        | sort by $table asc
+        """
+
+        # Execute query using module-level function without timespan restriction
+        # (None timespan allows querying all available data to discover all tables)
+        from azure.monitor.query import LogsQueryStatus
+
+        response = _execute_logs_query(
+            query=list_tables_query,
+            timespan=None,
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            workspace_id=workspace_id,
+            azure_cloud=self.azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            raise Exception(f"Query failed with status: {response.status}")
+
+        # Check if we got any tables
+        if not response.tables or len(response.tables) == 0:
+            return []
+
+        table = response.tables[0]
+
+        # Extract table names from results
+        # The $table column should be the first (and only) column
+        table_names = []
+        for row in table.rows:
+            if row and len(row) > 0:
+                table_name = row[0]
+                if table_name:
+                    table_names.append(str(table_name))
+
+        # KQL query sorts by $table, but sort again here to ensure deterministic results
+        return sorted(table_names)
+
+    def get_table_schema(self, table_name: str):
+        """Get the schema for a specific table by inferring it from a sample query.
+
+        Args:
+            table_name: Name of the table to get schema for
+
+        Returns:
+            StructType: The inferred schema for the table
+
+        Raises:
+            Exception: If workspace_id is not provided, or if query fails
+            ValueError: If table_name is empty or invalid
+
+        """
+        # Validate table name
+        if not table_name or not isinstance(table_name, str) or not table_name.strip():
+            raise ValueError("table_name must be a non-empty string")
+
+        table_name = table_name.strip()
+        import re
+
+        # Guard against KQL injection by validating allowed identifier characters.
+        # We intentionally disallow whitespace, pipes, quotes, and other KQL operators/commands.
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", table_name):
+            raise ValueError("table_name contains invalid characters (allowed: letters, digits, underscore, hyphen).")
+
+        # Validate auth options
+        self._validate_auth()
+
+        # Get and validate workspace_id
+        workspace_id = self.options.get("workspace_id")
+        assert workspace_id, "workspace_id is required"
+
+        # Create query to get one row from the table
+        sample_query = f"{table_name} | take 1"
+
+        # Use helper method to infer schema without timespan restriction
+        # (None timespan allows querying all available data)
+        try:
+            return self._infer_schema_from_query(
+                workspace_id=workspace_id,
+                query=sample_query,
+                timespan_value=None,
+                tenant_id=self.tenant_id,
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                azure_cloud=self.azure_cloud,
+            )
+        except Exception as e:
+            # Re-raise with table-specific error message
+            if "Schema inference failed" in str(e) and table_name not in str(e):
+                inner = str(e).replace("Schema inference failed: ", "")
+                raise Exception(f"Schema inference failed for table '{table_name}': {inner}") from e
+            raise
+
     def reader(self, schema: StructType):
         return AzureMonitorBatchReader(self.options, schema)
 
@@ -702,23 +1018,20 @@ class MicrosoftSentinelDataSource(AzureMonitorDataSource):
 
 
 class AzureMonitorReader:
-    """Base reader class for Azure Monitor / Log Analytics workspaces.
+    """Base reader class for Azure Monitor / Log Analytics workspaces and direct resource queries.
 
     Shared read logic for batch and streaming reads.
+    Supports both workspace-based queries (via workspace_id) and direct resource queries (via resource_id).
     """
 
     def __init__(self, options, schema: StructType):
         """Initialize the reader with options and schema.
 
         Args:
-            options: Dictionary of options containing workspace_id, query, credentials
+            options: Dictionary of options containing workspace_id/resource_id, query, credentials
             schema: StructType schema (provided by DataSource.schema())
 
         """
-        # Extract and validate required options
-        self.workspace_id = options.get("workspace_id")
-        self.query = options.get("query")
-
         # Authentication options (three methods supported)
         # 1. Databricks Unity Catalog service credential
         self.databricks_credential = options.get("databricks_credential")
@@ -728,10 +1041,7 @@ class AzureMonitorReader:
         self.tenant_id = options.get("tenant_id")
         self.client_id = options.get("client_id")
         self.client_secret = options.get("client_secret")
-
-        # Validate required options
-        assert self.workspace_id is not None, "workspace_id is required"
-        assert self.query is not None, "query is required"
+        self.azure_cloud = options.get("azure_cloud", "public")
 
         # Validate authentication: one of the three methods must be configured
         has_sp_auth = self.tenant_id and self.client_id and self.client_secret
@@ -744,8 +1054,18 @@ class AzureMonitorReader:
                 "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
             )
 
-        # Azure cloud environment: "public" (default), "government", or "china"
-        self.azure_cloud = options.get("azure_cloud", "public")
+        # Extract and validate read-specific options
+        self.workspace_id = options.get("workspace_id")
+        self.resource_id = options.get("resource_id")
+        self.query = options.get("query")
+
+        # Validate that exactly one of workspace_id or resource_id is provided
+        if self.workspace_id and self.resource_id:
+            raise ValueError("Cannot specify both workspace_id and resource_id. Use one or the other.")
+        if not self.workspace_id and not self.resource_id:
+            raise ValueError("Must specify either workspace_id or resource_id")
+
+        assert self.query, "query is required"
 
         # Retry and subdivision options
         self.max_retries = int(options.get("max_retries", "5"))
@@ -759,6 +1079,7 @@ class AzureMonitorReader:
         """Read data for the given partition time range.
 
         Handles throttling with retries and large result sets by subdividing time ranges.
+        Automatically uses the correct query method based on workspace_id or resource_id.
 
         Args:
             partition: TimeRangePartition containing start_time and end_time
@@ -773,14 +1094,15 @@ class AzureMonitorReader:
         # Use partition's time range
         timespan_value = (partition.start_time, partition.end_time)
 
-        # Execute query using module-level function (includes retry logic for 429)
+        # Execute query using unified function (handles both workspace and resource)
         response = _execute_logs_query(
-            workspace_id=self.workspace_id,
             query=self.query,
             timespan=timespan_value,
             tenant_id=self.tenant_id,
             client_id=self.client_id,
             client_secret=self.client_secret,
+            workspace_id=self.workspace_id,
+            resource_id=self.resource_id,
             max_retries=self.max_retries,
             initial_backoff=self.initial_backoff,
             azure_cloud=self.azure_cloud,
@@ -988,6 +1310,17 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
     Implements incremental streaming by tracking time-based offsets and splitting
     time ranges into partitions for parallel processing.
+
+    Stream-specific options:
+    - start_time: Starting timestamp for streaming. Supports three formats:
+        * "latest" (default): Start from current time
+        * "earliest": Automatically detect earliest timestamp in data (executes query during init)
+        * ISO 8601 timestamp string (e.g., "2024-01-01T00:00:00Z"): Explicit start time
+    - partition_duration: Duration of each partition in seconds (default: 3600 = 1 hour)
+    - timestamp_column: Column name for timestamp detection when using "earliest" (default: "TimeGenerated")
+
+    Note: When using start_time="earliest", a query is executed during initialization to find
+    the minimum timestamp in the data. This is a one-time cost but may be slow for very large tables.
     """
 
     def __init__(self, options, schema: StructType):
@@ -1001,12 +1334,19 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         super().__init__(options, schema)
 
         # Stream-specific options
+        # Timestamp column for earliest detection (default: TimeGenerated)
+        self.timestamp_column = options.get("timestamp_column", "TimeGenerated")
+
         start_time = options.get("start_time", "latest")
         # Support 'latest' as alias for current timestamp
         if start_time == "latest":
             from datetime import datetime, timezone
 
             self.start_time = datetime.now(timezone.utc).isoformat()
+        elif start_time == "earliest":
+            # Query to find the earliest timestamp in the data
+            # Note: This executes a query during initialization (one-time cost)
+            self.start_time = self._get_earliest_timestamp()
         else:
             # Validate that start_time is a valid ISO 8601 timestamp
             from datetime import datetime
@@ -1016,11 +1356,78 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
                 self.start_time = start_time
             except (ValueError, AttributeError) as e:
                 raise ValueError(
-                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z')"
+                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
                 ) from e
 
         # Partition duration in seconds (default 1 hour)
         self.partition_duration = int(options.get("partition_duration", "3600"))
+
+    def _get_earliest_timestamp(self):
+        """Query to find the earliest timestamp in the data.
+
+        Executes a KQL query to find the minimum value of the timestamp column
+        in the dataset. This is used when start_time="earliest" is specified.
+
+        Returns:
+            str: ISO 8601 formatted timestamp of the earliest data point
+
+        Raises:
+            Exception: If query execution fails
+
+        Note:
+            - If the query returns no data (empty table), falls back to current time
+            - Uses the timestamp_column option (default: "TimeGenerated")
+            - Executes with timespan=None to query all available data
+            - For tables with existing aggregations in the query, this finds the
+              earliest timestamp from the aggregated results, not raw data
+
+        """
+        from datetime import datetime, timezone
+
+        from azure.monitor.query import LogsQueryStatus
+
+        # Construct query to find earliest timestamp
+        # Format: {original_query} | summarize earliest=min({timestamp_column})
+        earliest_query = f"{self.query} | summarize earliest=min({self.timestamp_column})"
+
+        # Execute query without timespan restriction to find absolute earliest
+        response = _execute_logs_query(
+            query=earliest_query,
+            timespan=None,  # No time restriction
+            tenant_id=self.tenant_id,
+            client_id=self.client_id,
+            client_secret=self.client_secret,
+            workspace_id=self.workspace_id,
+            resource_id=self.resource_id,
+            max_retries=self.max_retries,
+            initial_backoff=self.initial_backoff,
+            azure_cloud=self.azure_cloud,
+        )
+
+        # Check query status
+        if response.status != LogsQueryStatus.SUCCESS:
+            # If query fails, fallback to current time
+            return datetime.now(timezone.utc).isoformat()
+
+        # Extract the earliest timestamp from response
+        if response.tables and len(response.tables) > 0:
+            table = response.tables[0]
+            if table.rows and len(table.rows) > 0:
+                earliest_value = table.rows[0][0]
+                if earliest_value is not None:
+                    # Handle both datetime objects and string values
+                    if isinstance(earliest_value, datetime):
+                        return earliest_value.isoformat()
+                    elif isinstance(earliest_value, str):
+                        # Validate and normalize the timestamp
+                        try:
+                            dt = datetime.fromisoformat(earliest_value.replace("Z", "+00:00"))
+                            return dt.isoformat()
+                        except (ValueError, AttributeError):
+                            pass
+
+        # Fallback if no data found or invalid timestamp - use current time
+        return datetime.now(timezone.utc).isoformat()
 
     def initialOffset(self):
         """Return the initial offset (start time minus 1 microsecond).
@@ -1116,10 +1523,6 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 class AzureMonitorWriter:
     def __init__(self, options):
         self.options = options
-        self.dce = self.options.get("dce")  # data_collection_endpoint
-        self.dcr_id = self.options.get("dcr_id")  # data_collection_rule_id
-        self.dcs = self.options.get("dcs")  # data_collection_stream
-        self.batch_size = int(self.options.get("batch_size", "50"))
 
         # Authentication options (three methods supported)
         # 1. Databricks Unity Catalog service credential
@@ -1134,11 +1537,6 @@ class AzureMonitorWriter:
         # Azure cloud environment: "public" (default), "government", or "china"
         self.azure_cloud = self.options.get("azure_cloud", "public")
 
-        # Validate required options
-        assert self.dce is not None, "dce is required"
-        assert self.dcr_id is not None, "dcr_id is required"
-        assert self.dcs is not None, "dcs is required"
-
         # Validate authentication: one of the three methods must be configured
         has_sp_auth = self.tenant_id and self.client_id and self.client_secret
         has_databricks_credential = self.databricks_credential is not None
@@ -1149,6 +1547,16 @@ class AzureMonitorWriter:
                 "Authentication required: provide either 'databricks_credential', "
                 "'azure_default_credential=true', or all of 'tenant_id', 'client_id', 'client_secret'"
             )
+
+        # Extract and validate write-specific options
+        self.dce = self.options.get("dce")  # data_collection_endpoint
+        self.dcr_id = self.options.get("dcr_id")  # data_collection_rule_id
+        self.dcs = self.options.get("dcs")  # data_collection_stream
+        self.batch_size = int(self.options.get("batch_size", "50"))
+
+        assert self.dce, "dce (data collection endpoint) is required"
+        assert self.dcr_id, "dcr_id (data collection rule ID) is required"
+        assert self.dcs, "dcs (data collection stream) is required"
 
     def _send_to_sentinel(self, s: LogsIngestionClient, msgs: list):
         if len(msgs) > 0:
@@ -1205,18 +1613,9 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it.
-        In this FakeStreamWriter, the metadata of the microbatch(number of rows and partitions) is written into a JSON file inside commit().
-        """
-        # status = dict(num_partitions=len(messages), rows=sum(m.count for m in messages))
-        # with open(os.path.join(self.path, f"{batchId}.json"), "a") as file:
-        #     file.write(json.dumps(status) + "\n")
+        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it."""
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it.
-        In this FakeStreamWriter, a failure message is written into a text file inside abort().
-        """
-        # with open(os.path.join(self.path, f"{batchId}.txt"), "w") as file:
-        #     file.write(f"failed in batch {batchId}")
+        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it."""
         pass

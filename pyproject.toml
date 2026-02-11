@@ -2,15 +2,26 @@
 # https://stackoverflow.com/questions/60971502/python-poetry-how-to-install-optional-dependencies
 [tool.poetry]
 name = "cyber-spark-data-connectors"
-version = "0.0.6"
+version = "0.0.7"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 authors = ["Alex Ott <alexott@gmail.com>"]
 packages = [
     {include = "cyber_connectors"}
 ]
+readme = "README.md"
+keywords = ["cybersecurity", "apache spark", "spark", "splunk", "log analytics", "ms sentinel"]
+
+[project]
+name = "cyber-spark-data-connectors"
+license = "Apache-2.0"
+license-files = ["LICEN[CS]E*"]
+
+[project.urls]
+Homepage = "https://github.com/alexott/cyber-spark-data-connectors"
+Issues = "https://github.com/alexott/cyber-spark-data-connectors/issues"
 
 [tool.poetry.dependencies]
-python = ">=3.9,<3.14"
+python = ">=3.9,<3.15"
 requests = "^2.32.5"
 azure-monitor-ingestion = "^1.1.0"
 azure-identity = "^1.25.1"
@@ -22,15 +33,15 @@ pytest-cov = "^7.0.0"
 pytest-spark = "^0.8.0"
 
 [tool.poetry.group.dev.dependencies]
-ruff = "^0.14.9"
+ruff = "^0.15.0"
 pyspark = {extras = ["sql,connect"], version = "4.0.1"}
 grpcio = ">=1.67.0"
 grpcio-status = ">=1.67.0"
 googleapis-common-protos = ">=1.65.0"
 #delta-spark = "^3.2.1"
 chispa = "^0.11.1"
-mypy = "^1.19.0"
-types-requests = "^2.32.4.20250913"
+mypy = "^1.19.1"
+types-requests = "^2.32.4.20260107"
 pyarrow = "^21.0.0"
 
 [build-system]
@@ -93,6 +104,7 @@ select = [
 ]
 ignore = [
 "D103",  # No docstring in public function
+"D401",  # First line of docstring should be in imperative mood
 "N812",  # Lowercase `functions` imported as non-lowercase `F`
 "F405",  # `assert_df_equality` may be undefined, or defined from star imports
 ]

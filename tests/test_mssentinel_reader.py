@@ -82,6 +82,9 @@ class TestAzureMonitorDataSource:
 
         from azure.monitor.query import LogsQueryStatus
 
+        # Use a query without limit clause so it gets modified
+        basic_options["query"] = "AzureActivity"
+
         # Create mock response for schema inference
         mock_response = Mock()
         mock_response.status = LogsQueryStatus.SUCCESS
@@ -272,6 +275,91 @@ class TestAzureMonitorDataSource:
             assert schema.fields[i].name == expected_name
             assert isinstance(schema.fields[i].dataType, expected_type_class)
 
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_success(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables returns sorted table names."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Unsorted input to ensure we sort deterministically
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.rows = [["SecurityEvent"], ["AzureActivity"]]
+        mock_response.tables = [mock_table]
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        result = ds.list_tables()
+
+        assert result == ["AzureActivity", "SecurityEvent"]
+
+        call_kwargs = mock_execute_logs_query.call_args[1]
+        assert "distinct $table" in call_kwargs["query"]
+        assert call_kwargs["timespan"] is None
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_empty_results(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables returns [] when query returns no tables."""
+        from azure.monitor.query import LogsQueryStatus
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        assert ds.list_tables() == []
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_list_tables_query_failure_raises(self, mock_execute_logs_query, basic_options):
+        """Test that list_tables raises when query fails."""
+        from azure.monitor.query import LogsQueryStatus
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.FAILURE
+        mock_response.tables = []
+        mock_execute_logs_query.return_value = mock_response
+
+        ds = AzureMonitorDataSource(options=basic_options)
+        with pytest.raises(Exception, match="Query failed with status"):
+            ds.list_tables()
+
+    def test_get_table_schema_invalid_table_name_rejected(self, basic_options):
+        """Test that get_table_schema validates table name to prevent KQL injection."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        with pytest.raises(ValueError, match="non-empty"):
+            ds.get_table_schema("")
+
+        with pytest.raises(ValueError, match="invalid characters"):
+            ds.get_table_schema("AzureActivity | take 1")
+
+    def test_get_table_schema_success_calls_infer(self, basic_options):
+        """Test that get_table_schema delegates to _infer_schema_from_query with expected query."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        expected_schema = StructType([StructField("TestCol", StringType(), True)])
+        with patch.object(AzureMonitorDataSource, "_infer_schema_from_query", return_value=expected_schema) as mock_infer:
+            result = ds.get_table_schema("AzureActivity")
+
+        assert result == expected_schema
+
+        call_kwargs = mock_infer.call_args[1]
+        assert call_kwargs["query"] == "AzureActivity | take 1"
+        assert call_kwargs["timespan_value"] is None
+
+    def test_get_table_schema_wraps_schema_inference_error_with_table(self, basic_options):
+        """Test that get_table_schema includes table name in Schema inference error."""
+        ds = AzureMonitorDataSource(options=basic_options)
+
+        with patch.object(
+            AzureMonitorDataSource,
+            "_infer_schema_from_query",
+            side_effect=Exception("Schema inference failed: query returned no tables"),
+        ):
+            with pytest.raises(Exception, match="AzureActivity"):
+                ds.get_table_schema("AzureActivity")
+
 
 class TestAzureMonitorBatchReader:
     """Test Azure Monitor Batch Reader implementation."""
@@ -319,7 +407,7 @@ class TestAzureMonitorBatchReader:
         assert reader.num_partitions == 3
 
     def test_reader_missing_workspace_id(self, basic_schema):
-        """Test reader fails without workspace_id."""
+        """Test reader fails without workspace_id or resource_id."""
         options = {
             "query": "AzureActivity | take 5",
             "timespan": "P1D",
@@ -328,7 +416,7 @@ class TestAzureMonitorBatchReader:
             "client_secret": "test-secret",
         }
 
-        with pytest.raises(AssertionError, match="workspace_id is required"):
+        with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
             AzureMonitorBatchReader(options, basic_schema)
 
     def test_reader_missing_query(self, basic_schema):
@@ -2227,3 +2315,194 @@ class TestAzureCloudConfiguration:
         # Verify endpoint was passed to client
         client_kwargs = mock_client.call_args[1]
         assert client_kwargs["endpoint"] == "https://api.loganalytics.us"
+
+
+class TestAzureMonitorResourceQuery:
+    """Test Azure Monitor direct resource query functionality."""
+
+    @pytest.fixture
+    def resource_options(self):
+        """Basic valid options for resource query."""
+        return {
+            "resource_id": "/subscriptions/test-sub/resourceGroups/test-rg/providers/Microsoft.Storage/storageAccounts/test-storage",
+            "query": "StorageBlobLogs | take 5",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    def test_mutual_exclusivity_both_ids(self, basic_schema):
+        """Test that workspace_id and resource_id are mutually exclusive."""
+        options = {
+            "workspace_id": "test-workspace",
+            "resource_id": "/subscriptions/test-sub/resourceGroups/test-rg/providers/test",
+            "query": "TestTable",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        with pytest.raises(ValueError, match="Cannot specify both workspace_id and resource_id"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+    def test_mutual_exclusivity_neither_id(self, basic_schema):
+        """Test that at least one of workspace_id or resource_id is required."""
+        options = {
+            "query": "TestTable",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
+            AzureMonitorBatchReader(options, basic_schema)
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_resource_query_execution(self, mock_credential, mock_client, resource_options, basic_schema):
+        """Test that resource queries use query_resource method."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Create mock response
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["test value"]]
+        mock_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_resource.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(resource_options, basic_schema)
+        partitions = reader.partitions()
+        results = list(reader.read(partitions[0]))
+
+        # Verify query_resource was called (not query_workspace)
+        mock_client_instance.query_resource.assert_called_once()
+        mock_client_instance.query_workspace.assert_not_called()
+
+        # Verify resource_id was passed
+        call_kwargs = mock_client_instance.query_resource.call_args[1]
+        assert call_kwargs["resource_id"] == resource_options["resource_id"]
+
+        # Verify results
+        assert len(results) == 1
+        assert results[0]["TestCol"] == "test value"
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_resource_schema_inference(self, mock_credential, mock_client, resource_options):
+        """Test that schema inference works with resource queries."""
+        from azure.monitor.query import LogsQueryStatus
+        from pyspark.sql.types import LongType, TimestampType
+
+        # Create mock response for schema inference
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TimeGenerated", "StatusCode"]
+        mock_table.rows = [[datetime(2024, 1, 1, 0, 0, 0), 200]]
+        mock_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_resource.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        ds = AzureMonitorDataSource(options=resource_options)
+        schema = ds.schema()
+
+        # Verify query_resource was called for schema inference
+        mock_client_instance.query_resource.assert_called_once()
+
+        # Verify schema was inferred correctly
+        assert len(schema.fields) == 2
+        assert schema.fields[0].name == "TimeGenerated"
+        assert isinstance(schema.fields[0].dataType, TimestampType)
+        assert schema.fields[1].name == "StatusCode"
+        assert isinstance(schema.fields[1].dataType, LongType)
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_resource_query_with_subdivision(self, mock_credential, mock_client, resource_options, basic_schema):
+        """Test that resource queries handle result size limits with subdivision."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # First call returns size limit error
+        mock_error_response = Mock()
+        mock_error_response.status = LogsQueryStatus.PARTIAL
+        mock_partial_error = Mock()
+        mock_partial_error.code = "E_QUERY_RESULT_SET_TOO_LARGE"
+        mock_error_response.partial_error = mock_partial_error
+
+        # Subsequent calls return success
+        mock_success_response = Mock()
+        mock_success_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["TestCol"]
+        mock_table.rows = [["value1"]]
+        mock_success_response.tables = [mock_table]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_resource.side_effect = [
+            mock_error_response,  # First call fails with size limit
+            mock_success_response,  # First half succeeds
+            mock_success_response,  # Second half succeeds
+        ]
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(resource_options, basic_schema)
+        partitions = reader.partitions()
+        results = list(reader.read(partitions[0]))
+
+        # Verify query_resource was called 3 times (1 initial + 2 subdivisions)
+        assert mock_client_instance.query_resource.call_count == 3
+
+        # Verify we got results from both subdivisions
+        assert len(results) == 2
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_datasource_schema_inference_rejects_both_ids(self, mock_credential, mock_client):
+        """Test that schema inference validates mutual exclusivity during inference."""
+        options = {
+            "workspace_id": "test-workspace",
+            "resource_id": "/subscriptions/test/resourceGroups/test/providers/test",
+            "query": "TestTable",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        ds = AzureMonitorDataSource(options=options)
+
+        with pytest.raises(ValueError, match="Cannot specify both workspace_id and resource_id"):
+            ds.schema()
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_datasource_schema_inference_rejects_neither_id(self, mock_credential, mock_client):
+        """Test that schema inference validates that one ID is provided."""
+        options = {
+            "query": "TestTable",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        ds = AzureMonitorDataSource(options=options)
+
+        with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
+            ds.schema()
+

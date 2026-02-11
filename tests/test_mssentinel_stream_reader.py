@@ -142,6 +142,183 @@ class TestAzureMonitorStreamReader:
         assert reader.start_time is not None
         assert "T" in reader.start_time
 
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' detects earliest timestamp."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock the query response
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["earliest"]
+        mock_table.rows = [[datetime(2023, 6, 1, 12, 0, 0, tzinfo=timezone.utc)]]
+        mock_response.tables = [mock_table]
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "earliest",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        assert reader.start_time == "2023-06-01T12:00:00+00:00"
+
+        # Verify the query was called with correct parameters
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args[1]
+        assert "AzureActivity | summarize earliest=min(TimeGenerated)" in call_kwargs["query"]
+        assert call_kwargs["timespan"] is None  # No time restriction
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest_custom_column(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' and custom timestamp_column."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock the query response
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["earliest"]
+        mock_table.rows = [[datetime(2023, 7, 15, 8, 30, 0, tzinfo=timezone.utc)]]
+        mock_response.tables = [mock_table]
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "CustomTable",
+            "start_time": "earliest",
+            "timestamp_column": "EventTime",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        assert reader.start_time == "2023-07-15T08:30:00+00:00"
+        assert reader.timestamp_column == "EventTime"
+
+        # Verify the query uses custom timestamp column
+        mock_query.assert_called_once()
+        call_kwargs = mock_query.call_args[1]
+        assert "CustomTable | summarize earliest=min(EventTime)" in call_kwargs["query"]
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest_empty_table(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' fallback for empty table."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock empty response
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["earliest"]
+        mock_table.rows = []
+        mock_response.tables = [mock_table]
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "earliest",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        # Should fallback to current time
+        assert reader.start_time is not None
+        assert "T" in reader.start_time
+        # Verify it's a recent timestamp
+        start_dt = datetime.fromisoformat(reader.start_time.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        time_diff = (now - start_dt).total_seconds()
+        assert time_diff < 60  # Less than 1 minute difference
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest_null_value(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' fallback for NULL timestamp."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock response with NULL value
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["earliest"]
+        mock_table.rows = [[None]]
+        mock_response.tables = [mock_table]
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "earliest",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        # Should fallback to current time
+        assert reader.start_time is not None
+        assert "T" in reader.start_time
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest_query_failure(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' fallback on query failure."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock failed query
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.FAILURE
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "earliest",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        # Should fallback to current time
+        assert reader.start_time is not None
+        assert "T" in reader.start_time
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_stream_reader_start_time_earliest_string_value(self, mock_query, basic_schema):
+        """Test stream reader with start_time='earliest' handles string timestamp values."""
+        from azure.monitor.query import LogsQueryStatus
+
+        # Mock response with string timestamp (some queries might return this)
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_table = Mock()
+        mock_table.columns = ["earliest"]
+        mock_table.rows = [["2023-08-20T14:45:00Z"]]
+        mock_response.tables = [mock_table]
+        mock_query.return_value = mock_response
+
+        options = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "start_time": "earliest",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+
+        reader = AzureMonitorStreamReader(options, basic_schema)
+        # Should parse and normalize the timestamp
+        assert reader.start_time == "2023-08-20T14:45:00+00:00"
+
     def test_stream_reader_invalid_start_time(self, basic_schema):
         """Test stream reader fails with invalid start_time format."""
         options = {
@@ -156,8 +333,15 @@ class TestAzureMonitorStreamReader:
         with pytest.raises(ValueError, match="Invalid start_time format"):
             AzureMonitorStreamReader(options, basic_schema)
 
+        # Also verify the error message mentions all valid formats
+        try:
+            AzureMonitorStreamReader(options, basic_schema)
+        except ValueError as e:
+            assert "latest" in str(e)
+            assert "earliest" in str(e)
+
     def test_stream_reader_missing_workspace_id(self, basic_schema):
-        """Test stream reader fails without workspace_id."""
+        """Test stream reader fails without workspace_id or resource_id."""
         options = {
             "query": "AzureActivity",
             "start_time": "2024-01-01T00:00:00Z",
@@ -166,7 +350,7 @@ class TestAzureMonitorStreamReader:
             "client_secret": "test-secret",
         }
 
-        with pytest.raises(AssertionError, match="workspace_id is required"):
+        with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
             AzureMonitorStreamReader(options, basic_schema)
 
     def test_stream_reader_missing_query(self, basic_schema):
