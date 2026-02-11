@@ -298,7 +298,10 @@ This data source supports both reading from and writing to [Microsoft Sentinel](
 
 This connector supports three authentication methods (in order of precedence):
 
-1. **Databricks Unity Catalog Service Credential** (`databricks_credential`): Use a named service credential configured in Unity Catalog. This is the recommended approach when running on Databricks with Unity Catalog enabled. See [Unity Catalog Service Credentials documentation](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/use-service-credentials).
+1. **Databricks Unity Catalog Service Credential** (`databricks_credential`): Use a named service credential configured in Unity Catalog. This is the recommended approach when running on Databricks with Unity Catalog enabled. See [Unity Catalog Service Credentials documentation](https://learn.microsoft.com/en-us/azure/databricks/connect/unity-catalog/cloud-services/use-service-credentials).  
+
+> [!WARNING]
+> Please note that due to the technical limitations, UC service credentials could be used only on worker nodes, so schema inference will fail with errors.  For such cases, provide explicit schema when reading data.
 
 2. **Azure DefaultAzureCredential** (`azure_default_credential`): Use Azure's DefaultAzureCredential, which automatically discovers credentials from the environment (managed identity, environment variables, etc.). This is useful when running on compute with attached service credentials or managed identity.
 
