@@ -34,7 +34,7 @@ pytest-spark = "^0.8.0"
 
 [tool.poetry.group.dev.dependencies]
 ruff = "^0.15.0"
-pyspark = {extras = ["sql,connect"], version = "4.0.1"}
+pyspark = {extras = ["sql,connect"], version = "4.0.2"}
 grpcio = ">=1.67.0"
 grpcio-status = ">=1.67.0"
 googleapis-common-protos = ">=1.65.0"
