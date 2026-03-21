@@ -81,6 +81,30 @@ class TestRestApiWriter:
         writer = RestApiBatchWriter(options)
         assert writer.http_method == "put"
 
+    def test_init_with_get_method(self):
+        """Test initialization with GET method."""
+        options = {"url": "http://localhost:8001", "http_method": "get"}
+        writer = RestApiBatchWriter(options)
+        assert writer.http_method == "get"
+
+    def test_init_with_query_param_columns(self):
+        """Test initialization with selected query parameter columns."""
+        options = {"url": "http://localhost:8001", "url_query_params": "id,name"}
+        writer = RestApiBatchWriter(options)
+        assert writer.query_param_columns == ["id", "name"]
+
+    def test_init_with_all_query_param_columns(self):
+        """Test initialization with wildcard query parameter columns."""
+        options = {"url": "http://localhost:8001", "url_query_params": "*"}
+        writer = RestApiBatchWriter(options)
+        assert writer.query_param_columns == "*"
+
+    def test_init_with_empty_query_param_columns(self):
+        """Test that empty query parameter column list raises error."""
+        options = {"url": "http://localhost:8001", "url_query_params": "   "}
+        with pytest.raises(ValueError, match="url_query_params cannot be empty"):
+            RestApiBatchWriter(options)
+
     def test_init_invalid_format(self):
         """Test that invalid format raises assertion error."""
         options = {"url": "http://localhost:8001", "http_format": "xml"}
@@ -144,6 +168,55 @@ class TestRestApiWriter:
 
     @patch("pyspark.TaskContext")
     @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_with_get_and_all_columns_as_query_params(self, mock_get_session, mock_task_context):
+        """Test GET requests when all row columns are sent as query parameters."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.get.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "http_method": "get",
+            "url_query_params": "*",
+        }
+        writer = RestApiBatchWriter(options)
+        commit_msg = writer.write(iter([Row(id=1, name="test")]))
+
+        assert commit_msg.count == 1
+        assert mock_session.get.called
+        call_args = mock_session.get.call_args[1]
+        assert call_args["params"] == {"id": "1", "name": "test"}
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_with_get_requires_all_columns_in_query_params(self, mock_get_session, mock_task_context):
+        """Test GET fails if any row columns would remain in request body."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "http_method": "get",
+            "url_query_params": "id",
+        }
+        writer = RestApiBatchWriter(options)
+
+        with pytest.raises(ValueError, match="HTTP GET requires all row columns"):
+            writer.write(iter([Row(id=1, name="test")]))
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
     def test_write_json_format(self, mock_get_session, mock_task_context, basic_options):
         """Test that data is properly serialized to JSON."""
         mock_context = Mock()
@@ -169,6 +242,112 @@ class TestRestApiWriter:
         assert payload["id"] == 1
         assert payload["name"] == "test"
         assert "timestamp" in payload
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_with_selected_query_params(self, mock_get_session, mock_task_context):
+        """Test that selected columns are sent as URL query parameters."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.post.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "url_query_params": "id,timestamp",
+        }
+        writer = RestApiBatchWriter(options)
+        timestamp = datetime(2024, 1, 1, 12, 0, 0)
+        rows = [Row(id=1, name="test", timestamp=timestamp)]
+        commit_msg = writer.write(iter(rows))
+
+        assert commit_msg.count == 1
+        call_args = mock_session.post.call_args[1]
+        assert call_args["params"] == {"id": "1", "timestamp": "2024-01-01T12:00:00"}
+        payload = json.loads(call_args["data"])
+        assert payload == {"name": "test"}
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_with_all_columns_as_query_params(self, mock_get_session, mock_task_context):
+        """Test that wildcard sends all columns as URL query parameters."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.post.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "url_query_params": "*",
+        }
+        writer = RestApiBatchWriter(options)
+        rows = [Row(id=1, name="test")]
+        writer.write(iter(rows))
+
+        call_args = mock_session.post.call_args[1]
+        assert call_args["params"] == {"id": "1", "name": "test"}
+        assert json.loads(call_args["data"]) == {}
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_form_data_with_query_params(self, mock_get_session, mock_task_context):
+        """Test form-data payload excludes columns sent as URL query parameters."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_response = Mock()
+        mock_response.status_code = 200
+        mock_response.text = '{"status": "ok"}'
+        mock_session.put.return_value = mock_response
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "http_format": "form-data",
+            "http_method": "put",
+            "url_query_params": "id",
+        }
+        writer = RestApiBatchWriter(options)
+        rows = [Row(id=1, name="test", value=123)]
+        writer.write(iter(rows))
+
+        call_args = mock_session.put.call_args[1]
+        assert call_args["params"] == {"id": "1"}
+        assert call_args["data"] == {"name": "test", "value": "123"}
+
+    @patch("pyspark.TaskContext")
+    @patch("cyber_connectors.RestApi.get_http_session")
+    def test_write_with_missing_query_param_column_raises(self, mock_get_session, mock_task_context):
+        """Test that missing query parameter columns raise a clear error."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        mock_session = Mock()
+        mock_get_session.return_value = mock_session
+
+        options = {
+            "url": "http://localhost:8001/api/endpoint",
+            "url_query_params": "missing_column",
+        }
+        writer = RestApiBatchWriter(options)
+
+        with pytest.raises(ValueError, match="missing_column"):
+            writer.write(iter([Row(id=1, name="test")]))
 
     @patch("pyspark.TaskContext")
     @patch("cyber_connectors.RestApi.get_http_session")
