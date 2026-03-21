@@ -731,13 +731,46 @@ df.write.format("rest").mode("overwrite") \
   .save()
 ```
 
+Usage with selected columns as URL query parameters:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/events") \
+  .option("url_query_params", "id,event_type") \
+  .save()
+```
+
+Usage with all columns as URL query parameters:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/search") \
+  .option("url_query_params", "*") \
+  .save()
+```
+
+Usage with HTTP GET:
+
+```python
+df.write.format("rest").mode("overwrite") \
+  .option("url", "http://api.example.com/search") \
+  .option("http_method", "get") \
+  .option("url_query_params", "*") \
+  .save()
+```
+
 Supported options:
 
 - `url` (string, required) - URL of the REST API endpoint to send data to.
 - `http_format` (string, optional, default: `json`) - Payload format to use. Supported values:
   - `json` - Send data as JSON (sets `Content-Type: application/json`)
   - `form-data` - Send data as form-encoded data (all values converted to strings)
-- `http_method` (string, optional, default: `post`) - HTTP method to use (`post` or `put`).
+- `http_method` (string, optional, default: `post`) - HTTP method to use (`get`, `post` or `put`).
+- `url_query_params` (string, optional) - Comma-separated list of column names to send as URL query parameters instead of request body fields.
+  - Use `*` to send all columns as URL query parameters
+  - Selected columns are removed from the request body payload
+  - Query parameter values are converted to strings; `datetime` and `date` values use ISO 8601 format
+  - `http_method=get` requires all row columns to be sent as query parameters (typically by using `url_query_params=*`)
 - `http_header_*` (string, optional) - Custom HTTP headers. Use prefix `http_header_` followed by the header name.
   - Example: `http_header_Authorization`, `http_header_X-API-Key`, `http_header_Content-Type`
   - Custom headers take precedence over default headers (e.g., you can override `Content-Type` for special API requirements)
@@ -789,6 +822,4 @@ Initial setup & build:
 ## References
 
 - Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
-
-
 
