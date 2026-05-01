@@ -1,8 +1,15 @@
 """Unit tests for common utilities."""
 
+import sys
 from datetime import date, datetime
+from unittest.mock import Mock, patch
 
-from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
+from cyber_connectors.common import (
+    DateTimeJsonEncoder,
+    SimpleCommitMessage,
+    get_http_session,
+    get_service_credentials_provider,
+)
 
 
 class TestSimpleCommitMessage:
@@ -145,3 +152,45 @@ class TestGetHttpSession:
         assert session is not None
         for key, value in headers.items():
             assert session.headers.get(key) == value
+
+
+class TestGetServiceCredentialsProvider:
+    """Test get_service_credentials_provider helper.
+
+    The helper picks the right Unity Catalog credential API based on
+    whether the call site is on a Spark executor (TaskContext present)
+    or on the driver (TaskContext absent).
+    """
+
+    def test_executor_uses_databricks_service_credentials(self):
+        """On an executor, resolve via databricks.service_credentials."""
+        mock_credential = Mock()
+        mock_service_credentials = Mock()
+        mock_service_credentials.getServiceCredentialsProvider.return_value = mock_credential
+
+        mock_databricks = Mock()
+        mock_databricks.service_credentials = mock_service_credentials
+
+        modules = {
+            "databricks": mock_databricks,
+            "databricks.service_credentials": mock_service_credentials,
+        }
+        with patch.dict(sys.modules, modules), patch("pyspark.TaskContext.get", return_value=Mock()):
+            result = get_service_credentials_provider("my-credential")
+
+        mock_service_credentials.getServiceCredentialsProvider.assert_called_once_with("my-credential")
+        assert result is mock_credential
+
+    def test_driver_uses_dbutils(self):
+        """On the driver, fall back to dbutils.credentials."""
+        mock_credential = Mock()
+        mock_dbutils = Mock()
+        mock_dbutils.credentials.getServiceCredentialsProvider.return_value = mock_credential
+
+        with patch("pyspark.TaskContext.get", return_value=None), patch(
+            "cyber_connectors.common._driver_dbutils", return_value=mock_dbutils
+        ):
+            result = get_service_credentials_provider("my-credential")
+
+        mock_dbutils.credentials.getServiceCredentialsProvider.assert_called_once_with("my-credential")
+        assert result is mock_credential

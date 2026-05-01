@@ -339,7 +339,9 @@ class TestAzureMonitorDataSource:
         ds = AzureMonitorDataSource(options=basic_options)
 
         expected_schema = StructType([StructField("TestCol", StringType(), True)])
-        with patch.object(AzureMonitorDataSource, "_infer_schema_from_query", return_value=expected_schema) as mock_infer:
+        with patch.object(
+            AzureMonitorDataSource, "_infer_schema_from_query", return_value=expected_schema
+        ) as mock_infer:
             result = ds.get_table_schema("AzureActivity")
 
         assert result == expected_schema
@@ -1904,14 +1906,14 @@ class TestAlternativeAuthentication:
 
     @patch("azure.monitor.query.LogsQueryClient")
     def test_execute_query_with_databricks_credential(self, mock_client):
-        """Test _execute_logs_query with databricks_credential."""
+        """Test _execute_logs_query with databricks_credential on an executor."""
         import sys
 
         from azure.monitor.query import LogsQueryStatus
 
         from cyber_connectors.MsSentinel import _execute_logs_query
 
-        # Mock the databricks.service_credentials module
+        # Mock the databricks.service_credentials module (executor-side API)
         mock_credential = Mock()
         mock_service_credentials = Mock()
         mock_service_credentials.getServiceCredentialsProvider.return_value = mock_credential
@@ -1920,8 +1922,9 @@ class TestAlternativeAuthentication:
         mock_databricks = Mock()
         mock_databricks.service_credentials = mock_service_credentials
 
-        # Inject mock module into sys.modules
-        with patch.dict(sys.modules, {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}):
+        # Inject mock module into sys.modules and simulate executor (TaskContext present)
+        modules = {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}
+        with patch.dict(sys.modules, modules), patch("pyspark.TaskContext.get", return_value=Mock()):
             mock_response = Mock()
             mock_response.status = LogsQueryStatus.SUCCESS
             mock_response.tables = []
@@ -1940,6 +1943,43 @@ class TestAlternativeAuthentication:
             # Verify Databricks credential was used
             mock_service_credentials.getServiceCredentialsProvider.assert_called_once_with("my-azure-credential")
             # Verify LogsQueryClient was created with the Databricks credential
+            mock_client.assert_called_once_with(mock_credential)
+            assert result.status == LogsQueryStatus.SUCCESS
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    def test_execute_query_with_databricks_credential_on_driver(self, mock_client):
+        """Test _execute_logs_query with databricks_credential on the driver.
+
+        On the driver there is no TaskContext, so the data source must
+        resolve the credential via the driver-side ``dbutils``.
+        """
+        from azure.monitor.query import LogsQueryStatus
+
+        from cyber_connectors.MsSentinel import _execute_logs_query
+
+        mock_credential = Mock()
+        mock_dbutils = Mock()
+        mock_dbutils.credentials.getServiceCredentialsProvider.return_value = mock_credential
+
+        mock_response = Mock()
+        mock_response.status = LogsQueryStatus.SUCCESS
+        mock_response.tables = []
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = mock_response
+        mock_client.return_value = mock_client_instance
+
+        with patch("pyspark.TaskContext.get", return_value=None), patch(
+            "cyber_connectors.common._driver_dbutils", return_value=mock_dbutils
+        ):
+            result = _execute_logs_query(
+                workspace_id="test",
+                query="test",
+                timespan=(datetime.now(), datetime.now()),
+                databricks_credential="my-azure-credential",
+            )
+
+            mock_dbutils.credentials.getServiceCredentialsProvider.assert_called_once_with("my-azure-credential")
             mock_client.assert_called_once_with(mock_credential)
             assert result.status == LogsQueryStatus.SUCCESS
 
@@ -2024,7 +2064,8 @@ class TestAlternativeAuthentication:
         mock_databricks = Mock()
         mock_databricks.service_credentials = mock_service_credentials
 
-        with patch.dict(sys.modules, {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}):
+        modules = {"databricks": mock_databricks, "databricks.service_credentials": mock_service_credentials}
+        with patch.dict(sys.modules, modules), patch("pyspark.TaskContext.get", return_value=Mock()):
             result = _get_credential_from_options(
                 databricks_credential="my-credential",
                 azure_default_credential=True,  # Also set, but should be ignored
@@ -2505,4 +2546,3 @@ class TestAzureMonitorResourceQuery:
 
         with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
             ds.schema()
-

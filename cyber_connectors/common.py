@@ -42,3 +42,62 @@ def get_http_session(retry: int = 5, additional_headers: dict = None, retry_on_p
         session.mount("https://", adapter)
 
     return session
+
+
+def _driver_dbutils():
+    """Return the driver-side ``dbutils`` object on a Databricks runtime.
+
+    On DBR clusters ``dbutils`` is injected into the notebook's Python
+    namespace by the kernel — the data source ``writer()``/``reader()``
+    callbacks run in that same process, so it's reachable via the IPython
+    user namespace or ``__main__`` globals. As a last resort, fall back to
+    the Databricks SDK runtime helper.
+    """
+    try:
+        import IPython
+
+        ipy = IPython.get_ipython()
+        if ipy is not None:
+            db = ipy.user_ns.get("dbutils")
+            if db is not None:
+                return db
+    except Exception:
+        pass
+
+    import sys
+
+    main = sys.modules.get("__main__")
+    if main is not None:
+        db = getattr(main, "dbutils", None)
+        if db is not None:
+            return db
+
+    from databricks.sdk.runtime import dbutils
+
+    return dbutils
+
+
+def get_service_credentials_provider(credential_name):
+    """Return a Unity Catalog service credential provider, on driver or executor.
+
+    ``databricks.service_credentials.getServiceCredentialsProvider`` only
+    works on Spark executors (where a ``TaskContext`` is present). On the
+    driver — for example during schema inference or other ``DataSource``
+    callbacks invoked before tasks are scheduled — we fall back to the
+    notebook-injected ``dbutils.credentials.getServiceCredentialsProvider``.
+
+    Args:
+        credential_name: Name of the Unity Catalog service credential.
+
+    Returns:
+        Credential provider object suitable for the underlying client SDK.
+
+    """
+    from pyspark import TaskContext
+
+    if TaskContext.get() is not None:
+        from databricks.service_credentials import getServiceCredentialsProvider
+
+        return getServiceCredentialsProvider(credential_name)
+
+    return _driver_dbutils().credentials.getServiceCredentialsProvider(credential_name)
