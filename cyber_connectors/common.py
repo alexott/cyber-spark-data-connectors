@@ -47,11 +47,17 @@ def get_http_session(retry: int = 5, additional_headers: dict = None, retry_on_p
 def _driver_dbutils():
     """Return the driver-side ``dbutils`` object on a Databricks runtime.
 
-    On DBR clusters ``dbutils`` is injected into the notebook's Python
-    namespace by the kernel — the data source ``writer()``/``reader()``
-    callbacks run in that same process, so it's reachable via the IPython
-    user namespace or ``__main__`` globals. As a last resort, fall back to
-    the Databricks SDK runtime helper.
+    Tries several lookup strategies because where ``dbutils`` lives depends
+    on the runtime:
+
+    1. **DBR classic notebook** — the kernel injects ``dbutils`` into the
+       notebook's IPython namespace and ``__main__`` globals.
+    2. **DBR Serverless / Databricks Connect** — the data source callback
+       runs in an isolated Python process with no notebook kernel attached.
+       The active ``SparkSession`` carries the workspace auth context, so
+       ``pyspark.dbutils.DBUtils(spark)`` produces a working ``dbutils``.
+    3. **Bare SDK runtime** — last-resort proxy that requires the SDK to be
+       able to construct a workspace ``Config``.
     """
     try:
         import IPython
@@ -71,6 +77,16 @@ def _driver_dbutils():
         db = getattr(main, "dbutils", None)
         if db is not None:
             return db
+
+    try:
+        from pyspark.dbutils import DBUtils
+        from pyspark.sql import SparkSession
+
+        spark = SparkSession.getActiveSession()
+        if spark is not None:
+            return DBUtils(spark)
+    except Exception:
+        pass
 
     from databricks.sdk.runtime import dbutils
 
