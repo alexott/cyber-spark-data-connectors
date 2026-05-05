@@ -14,7 +14,7 @@ from pyspark.sql.datasource import (
 )
 from pyspark.sql.types import StructType
 
-from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_service_credentials_provider
 
 
 def _get_azure_cloud_config(azure_cloud=None):
@@ -114,9 +114,7 @@ def _get_credential_from_options(
     """
     # Priority 1: Databricks Unity Catalog service credential
     if databricks_credential:
-        import databricks.service_credentials
-
-        return databricks.service_credentials.getServiceCredentialsProvider(databricks_credential)
+        return get_service_credentials_provider(databricks_credential)
 
     # Priority 2: Azure DefaultAzureCredential (for managed identity, etc.)
     if azure_default_credential:
