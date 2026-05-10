@@ -4,6 +4,7 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
 
 - [Custom data sources/sinks for Cybersecurity-related work](#custom-data-sourcessinks-for-cybersecurity-related-work)
   - [Available data sources](#available-data-sources)
+    - [PCAP data source](#pcap-data-source)
     - [Splunk data source](#splunk-data-source)
       - [Writing to Splunk](#writing-to-splunk)
       - [Reading from Splunk](#reading-from-splunk)
@@ -24,6 +25,60 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
 
 > [!NOTE]
 > Most of these data sources/sinks are designed to work with relatively small amounts of data - alerts, etc.  If you need to read or write huge amounts of data, use native export/import functionality of corresponding external system.
+
+### PCAP data source
+
+This data source reads PCAP files and converts them into one Spark row per parsed packet. Registered data source name is `pcap`.
+
+> [!NOTE]
+> The current implementation uses Spark's `binaryFile` source for discovery and content loading. It works well for local files, Unity Catalog volumes, and supported cloud storage, but it is intended for moderate file sizes rather than very large packet captures.
+
+Batch read usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(PcapDataSource)
+
+df = spark.read.format("pcap") \
+  .option("recursiveFileLookup", "true") \
+  .option("pathGlobFilter", "*.pcap") \
+  .load("/Volumes/main/default/security/pcap/")
+
+df.select("timestamp", "src_ip", "dst_ip", "protocol").show()
+```
+
+Streaming read usage:
+
+```python
+from cyber_connectors import *
+spark.dataSource.register(PcapDataSource)
+
+stream_df = spark.readStream.format("pcap") \
+  .option("maxFilesPerBatch", "10") \
+  .option("ignoreCorruptFiles", "true") \
+  .load("/Volumes/main/default/security/pcap/")
+
+query = stream_df.writeStream \
+  .trigger(availableNow=True) \
+  .option("checkpointLocation", "/Volumes/main/default/checkpoints/pcap-job/") \
+  .format("console") \
+  .start()
+
+query.awaitTermination()
+```
+
+Supported read options:
+
+- `recursiveFileLookup` (bool, optional, default: `false`) - search nested directories recursively.
+- `pathGlobFilter` (string, optional) - glob pattern used to filter candidate files.
+- `fileNamePattern` (string, optional) - alias of `pathGlobFilter`.
+- `modifiedAfter` (string, optional) - only read files modified after the given ISO 8601 timestamp.
+- `modifiedBefore` (string, optional) - only read files modified before the given ISO 8601 timestamp.
+- `ignoreCorruptFiles` (bool, optional, default: `false`) - skip malformed PCAP files instead of failing.
+- `ignoreMissingFiles` (bool, optional, default: `false`) - skip files that disappear between discovery and content loading.
+- `maxFilesPerBatch` (int, optional) - limit the number of files processed per micro-batch in streaming mode.
+- `mode` (string, optional, default: `FAILFAST`) - use `PERMISSIVE` to behave like `ignoreCorruptFiles=true`.
+- `settling_delay_seconds` (int, optional, default: `0`) - delay before newly discovered files become eligible in streaming mode.
 
 ### Splunk data source
 
@@ -822,4 +877,3 @@ Initial setup & build:
 ## References
 
 - Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
-
