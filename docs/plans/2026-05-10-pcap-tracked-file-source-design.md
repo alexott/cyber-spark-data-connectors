@@ -26,7 +26,7 @@ The source should support both:
 - Reuse the existing PCAP parser logic by copying/adapting it into this repository
 - Provide a reusable tracked-file base for future sources
 - Support both batch and streaming modes
-- Persist processed-file state under `checkpointLocation`
+- Persist streaming progress through Spark-checkpointed source offsets
 - Work in classic Spark environments and remain compatible with Databricks Serverless constraints
 
 ### Non-Goals
@@ -68,11 +68,10 @@ This is the reusable entry point for future file formats.
 Shared base reader for batch and streaming file-backed sources. Responsibilities:
 
 - parse and validate common options
-- restore processed-file state from checkpoint metadata
 - run file discovery through a pluggable strategy
 - decide which files are new and eligible
 - create partitions
-- persist processed-file entries after successful batches
+- support offset-based progress for streaming
 
 This class owns tracking logic, but not file-format parsing.
 
@@ -174,27 +173,19 @@ Do not use filename-only identity by default. Spark supports that mode, but it i
 
 ### Processed-File State
 
-Processed-file state is needed for streaming only.
+Batch reads do not need durable processed-file tracking and remain stateless.
 
-This mirrors Spark's `FileStreamSourceLog` model:
+For streaming, the implemented first version uses an offset watermark rather than a separate source metadata log:
 
-- each committed micro-batch records the file entries it processed
-- restart restores all committed entries
-- retries re-read only uncommitted work
+- files are ordered by `(modification_time_ms, path)`
+- the source offset stores the last processed pair
+- restart resumes from the offset stored in the Spark query checkpoint
 
-Batch reads do not need durable processed-file tracking and should remain stateless.
-
-### In-Memory Seen Set
-
-At runtime, maintain an in-memory set or map of seen files restored from checkpoint.
-
-Like Spark's `SeenFilesMap`, this avoids repeated linear scans during ongoing discovery. The in-memory structure is an optimization; checkpoint metadata remains the source of truth.
+This avoids a separate `trackingLocation` and works with the currently exposed Python streaming source API.
 
 ### Retention and Purging
 
-Initial implementation can retain all tracked entries in the metadata log.
-
-If log size becomes an issue, add compaction or age-based purging later. This should be a later optimization, not part of the first implementation.
+The offset-only implementation does not create a separate file-entry metadata log, so there is nothing extra to compact or purge in the first version.
 
 ## Batch Read Behavior
 
@@ -213,15 +204,15 @@ Streaming mode should implement micro-batch file discovery, not continuous strea
 
 ### Offset Model
 
-The streaming offset should be file-based rather than time-based.
+The streaming offset is file-based rather than time-based.
 
-Recommended shape:
+Implemented shape:
 
 - offset version
-- batch or log sequence number
-- optional metadata about the latest committed discovery set
+- `modification_time_ms`
+- `path`
 
-The true durable progress comes from the committed file-entry log under checkpoint. The offset mainly coordinates batch boundaries with Spark's streaming API.
+The offset is a stable watermark over files ordered by `(modification_time_ms, path)`.
 
 ### Streaming Flow
 
@@ -229,11 +220,10 @@ For each micro-batch:
 
 1. discover current candidate files
 2. apply a settling delay so only stable files are eligible
-3. remove files already committed in the processed-file log
-4. select the next batch of files
-5. convert those files into partitions
-6. parse them and emit packet rows
-7. persist the processed entries after successful batch commit
+3. select files whose `(modification_time_ms, path)` sort key is greater than the current offset
+4. cap the batch by `maxFilesPerBatch` when configured
+5. parse those files and emit packet rows
+6. rely on Spark to checkpoint the returned end offset
 
 ### Settling Delay
 
@@ -268,10 +258,10 @@ Reasons:
 
 Keep the parser logic separate from tracking logic.
 
-Recommended split:
+Implemented split:
 
 - parsing helpers and schema in `cyber_connectors/Pcap.py`
-- generic tracked-file helpers in the same file initially, or in a simple shared helper module if reuse clearly justifies it
+- file discovery, batch reader, and streaming reader helpers in the same file for the first version
 
 The parser should accept either:
 
@@ -300,7 +290,6 @@ The schema should be predefined, not inferred from input files.
 Use Databricks-compatible option names where practical, especially for file-discovery behavior.
 
 - `path` - input path or directory
-- `checkpointLocation` - required for processed-file tracking
 - `recursiveFileLookup` - whether to recurse into subdirectories
 - `pathGlobFilter` - optional glob filter for file selection
 - `fileNamePattern` - alias of `pathGlobFilter` for API familiarity
@@ -310,7 +299,6 @@ Use Databricks-compatible option names where practical, especially for file-disc
 - `ignoreMissingFiles` - skip files that disappear after discovery but before parsing
 - `maxFilesPerBatch` - optional limit for streaming or large batch runs
 - `mode` - `FAILFAST` or `PERMISSIVE`
-- `discovery_strategy` - optional override: `spark_native` or `hadoop_fs`
 - `settling_delay_seconds` - source-specific option controlling how long a newly discovered file must age before it is eligible
 
 ### Option Semantics
@@ -357,9 +345,9 @@ If a file was discovered but no longer exists when a partition tries to read it:
 - **default behavior**: fail the read
 - **`ignoreMissingFiles=true`**: skip the missing file and continue
 
-### Metadata Log Errors
+### Checkpoint and Offset Errors
 
-Fail fast if the checkpoint metadata log is unreadable or corrupted. Tracking state is part of correctness, so silently ignoring corruption would risk duplicate or missing ingestion.
+Fail fast if the source offset is malformed or if the query checkpoint cannot be used to restore progress.
 
 ## Testing Strategy
 
@@ -367,10 +355,10 @@ Fail fast if the checkpoint metadata log is unreadable or corrupted. Tracking st
 
 Test the reusable tracking logic independently from PCAP parsing:
 
-- restore from checkpoint metadata
-- candidate filtering against processed entries
+- offset round-trip serialization
+- candidate filtering against modification-time constraints
 - partition planning
-- file identity behavior
+- offset ordering behavior
 - settling delay behavior
 - restart behavior with an existing checkpoint
 
@@ -400,7 +388,7 @@ Estimated effort for a first solid implementation:
 
 | Scope | Estimate |
 |---|---|
-| Base tracked-file abstraction, metadata log, common options | 2-3 days |
+| Base tracked-file abstraction and common options | 2-3 days |
 | `SparkNativeDiscovery` prototype and tests | 1-2 days |
 | `HadoopFsDiscovery` optional support | 1 day |
 | PCAP parser adaptation and connector integration | 1-2 days |
@@ -447,8 +435,7 @@ For this project, Spark-side tracking is not worth the cost.
 Implement a reusable **tracked file source base** in Python with:
 
 - **Serverless-compatible Spark-native discovery as the primary strategy**
-- **optional Hadoop filesystem discovery for classic clusters**
-- **checkpoint-based processed-file tracking in this library**
+- **offset-only streaming progress through Spark checkpoints**
 - **PCAP parsing adapted from the existing tested parser**
 
 This provides the best balance of correctness, portability, simplicity, and reuse for future file-backed cybersecurity data sources.
