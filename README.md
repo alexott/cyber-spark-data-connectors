@@ -807,14 +807,14 @@ pip install cyber-spark-data-connectors
 
 ## Building
 
-This project uses [Poetry](https://python-poetry.org/) to manage dependencies and building the package. 
+This project uses [`uv`](https://docs.astral.sh/uv/) to manage dependencies and build the package.
 
 Initial setup & build:
 
-- Install Poetry
-- Set the Poetry environment with `poetry env use 3.10` (or higher Python version)
-- Activate Poetry environment with `. $(poetry env info -p)/bin/activate`
-- Build the wheel file with `poetry build`. Generated file will be stored in the `dist` directory.
+- Install `uv`
+- Sync the project environment with `uv sync`
+- Run commands inside the managed environment with `uv run ...`
+- Build the wheel file with `uv build`. Generated files will be stored in the `dist` directory.
 
 > [!CAUTION]
 > Right now, some dependencies aren't included into manifest, so if you will try it with OSS Spark, you will need to make sure that you have following dependencies set: `pyspark[sql]` (version `4.0.0.dev2` or higher), `grpcio` (`>=1.48,<1.57`), `grpcio-status` (`>=1.48,<1.57`), `googleapis-common-protos` (`1.56.4`).
@@ -822,4 +822,3 @@ Initial setup & build:
 ## References
 
 - Splunk: [Format events for HTTP Event Collector](https://docs.splunk.com/Documentation/Splunk/9.3.1/Data/FormateventsforHTTPEventCollector)
-
