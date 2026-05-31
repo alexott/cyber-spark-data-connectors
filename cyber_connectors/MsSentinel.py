@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import cast
 
 from azure.monitor.ingestion import LogsIngestionClient
 from pyspark.sql.datasource import (
@@ -114,9 +115,12 @@ def _get_credential_from_options(
     """
     # Priority 1: Databricks Unity Catalog service credential
     if databricks_credential:
-        import databricks.service_credentials
+        try:
+            import databricks.service_credentials as service_credentials  # type: ignore[import-not-found]
+        except ImportError as err:
+            raise ImportError("databricks.service_credentials is required for databricks_credential auth") from err
 
-        return databricks.service_credentials.getServiceCredentialsProvider(databricks_credential)
+        return service_credentials.getServiceCredentialsProvider(databricks_credential)
 
     # Priority 2: Azure DefaultAzureCredential (for managed identity, etc.)
     if azure_default_credential:
@@ -515,7 +519,9 @@ def _convert_value_to_schema_type(value, spark_type):
             return value
 
     except (ValueError, TypeError) as e:
-        raise ValueError(f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}")
+        raise ValueError(
+            f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}"
+        ) from e
 
 
 @dataclass
@@ -1216,7 +1222,7 @@ class AzureMonitorReader:
                             converted_value = _convert_value_to_schema_type(raw_value, expected_type)
                             row_dict[column_name] = converted_value
                         except ValueError as e:
-                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}")
+                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}") from e
                     # Note: columns not in schema are ignored (not included in row)
 
                 # Second, add NULL values for schema columns that are not in query results
@@ -1276,6 +1282,9 @@ class AzureMonitorBatchReader(AzureMonitorReader, DataSourceReader):
             partitions.append(TimeRangePartition(partition_start, partition_end))
 
         return partitions
+
+    def read(self, partition):
+        return super().read(cast(TimeRangePartition, partition))
 
 
 class AzureMonitorOffset:
@@ -1372,7 +1381,8 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
                 self.start_time = start_time
             except (ValueError, AttributeError) as e:
                 raise ValueError(
-                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
+                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format "
+                    "(e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
                 ) from e
 
         # Partition duration in seconds (default 1 hour)
@@ -1526,6 +1536,9 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
 
         return partitions
 
+    def read(self, partition):
+        return super().read(cast(TimeRangePartition, partition))
+
     def commit(self, end):
         """Called when a batch is successfully processed.
 
@@ -1582,7 +1595,7 @@ class AzureMonitorWriter:
             s.upload(rule_id=self.dcr_id, stream_name=self.dcs, logs=msgs)
 
     def write(self, iterator):
-        """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
+        """Write the data and return the commit message for that partition."""
         import json
 
         from azure.monitor.ingestion import LogsIngestionClient
@@ -1606,6 +1619,8 @@ class AzureMonitorWriter:
         msgs = []
 
         context = TaskContext.get()
+        if context is None:
+            raise RuntimeError("TaskContext is not available")
         partition_id = context.partitionId()
         cnt = 0
         for row in iterator:
@@ -1631,9 +1646,9 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it."""
+        """Handle a successfully written streaming batch."""
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it."""
+        """Handle a failed streaming batch."""
         pass

@@ -1,8 +1,12 @@
+"""REST API data source implementation."""
+
+from collections.abc import Iterator
 from datetime import date, datetime
-from typing import Any, Dict, Iterator
+from typing import Any, cast
 
 from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourceWriter, WriterCommitMessage
 from pyspark.sql.types import Row, StructType
+from requests import Response
 
 from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
 
@@ -37,13 +41,16 @@ class RestApiDataSource(DataSource):
 
 
 class RestApiWriter:
-    def __init__(self, options: Dict[str, Any]):
+    def __init__(self, options: dict[str, Any]):
         self.options = options
-        self.url = self.options.get("url")
+        url = self.options.get("url")
         self.payload_format: str = self.options.get("http_format", "json").lower()
         self.http_method: str = self.options.get("http_method", "post").lower()
-        self.query_param_columns = self._parse_query_param_columns(self.options.get("url_query_params"))
-        assert self.url is not None
+        self.query_param_columns: list[str] | str | None = self._parse_query_param_columns(
+            self.options.get("url_query_params")
+        )
+        assert isinstance(url, str)
+        self.url = url
         assert self.payload_format in ["json", "form-data"]
         assert self.http_method in ["get", "post", "put"]
 
@@ -81,7 +88,7 @@ class RestApiWriter:
             return value.isoformat()
         return str(value)
 
-    def _split_row_data(self, row_dict: Dict[str, Any]) -> tuple[Dict[str, Any], Dict[str, str]]:
+    def _split_row_data(self, row_dict: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
         """Split a row into request body fields and URL query parameters."""
         if self.query_param_columns is None:
             return row_dict, {}
@@ -89,7 +96,7 @@ class RestApiWriter:
         if self.query_param_columns == "*":
             query_param_columns = list(row_dict.keys())
         else:
-            query_param_columns = self.query_param_columns
+            query_param_columns = cast(list[str], self.query_param_columns)
             missing_columns = [column for column in query_param_columns if column not in row_dict]
             if missing_columns:
                 missing_columns_str = ", ".join(missing_columns)
@@ -118,11 +125,13 @@ class RestApiWriter:
         # make retry_on_post configurable
         s = get_http_session(additional_headers=additional_headers, retry_on_post=True)
         context = TaskContext.get()
+        if context is None:
+            raise RuntimeError("TaskContext is not available")
         partition_id = context.partitionId()
         cnt = 0
         for row in iterator:
             cnt += 1
-            data = None
+            data: str | dict[str, str] | None = None
             row_dict = row.asDict()
             payload_dict, query_params = self._split_row_data(row_dict)
             if self.http_method == "get" and payload_dict:
@@ -135,7 +144,7 @@ class RestApiWriter:
                 data = {k: str(v) if v is not None else "" for k, v in payload_dict.items()}
 
             if self.http_method == "get":
-                response = s.get(self.url, params=query_params)
+                response: Response = s.get(self.url, params=query_params)
             elif self.http_method == "post":
                 response = s.post(self.url, data=data, params=query_params)
             elif self.http_method == "put":
