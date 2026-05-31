@@ -1,52 +1,56 @@
-# TODO: add Azure stuff as optional dependencies
-# https://stackoverflow.com/questions/60971502/python-poetry-how-to-install-optional-dependencies
-[tool.poetry]
+[project]
 name = "cyber-spark-data-connectors"
 version = "0.0.7"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
-authors = ["Alex Ott <alexott@gmail.com>"]
-packages = [
-    {include = "cyber_connectors"}
-]
 readme = "README.md"
+requires-python = ">=3.9,<3.15"
+authors = [
+    { name = "Alex Ott", email = "alexott@gmail.com" }
+]
 keywords = ["cybersecurity", "apache spark", "spark", "splunk", "log analytics", "ms sentinel"]
-
-[project]
-name = "cyber-spark-data-connectors"
 license = "Apache-2.0"
 license-files = ["LICEN[CS]E*"]
+dependencies = [
+    "requests>=2.32.5,<3.0.0",
+    "azure-monitor-ingestion>=1.1.0,<2.0.0",
+    "azure-identity>=1.25.1,<2.0.0",
+    "azure-monitor-query>=2.0.0,<3.0.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/alexott/cyber-spark-data-connectors"
 Issues = "https://github.com/alexott/cyber-spark-data-connectors/issues"
 
-[tool.poetry.dependencies]
-python = ">=3.9,<3.15"
-requests = "^2.32.5"
-azure-monitor-ingestion = "^1.1.0"
-azure-identity = "^1.25.1"
-azure-monitor-query = "^2.0.0"
-
-[tool.poetry.group.test.dependencies]
-pytest = "^8.4.2"
-pytest-cov = "^7.0.0"
-pytest-spark = "^0.8.0"
-
-[tool.poetry.group.dev.dependencies]
-ruff = "^0.15.0"
-pyspark = {extras = ["sql,connect"], version = "4.0.2"}
-grpcio = ">=1.67.0"
-grpcio-status = ">=1.67.0"
-googleapis-common-protos = ">=1.65.0"
-#delta-spark = "^3.2.1"
-chispa = "^0.11.1"
-mypy = "^1.19.1"
-types-requests = "^2.32.4.20260107"
-pyarrow = "^21.0.0"
+[dependency-groups]
+dev = [
+    "pytest>=8.4.2,<9.0.0",
+    "pytest-cov>=7.0.0,<8.0.0",
+    "pytest-spark>=0.8.0,<0.9.0",
+    "ruff>=0.15.0,<0.16.0",
+    "pyspark[connect,sql]==4.0.2",
+    "grpcio>=1.67.0",
+    "grpcio-status>=1.67.0",
+    "googleapis-common-protos>=1.65.0",
+    "chispa>=0.11.1,<0.12.0",
+    "mypy>=1.19.1,<2.0.0",
+    "types-requests==2.32.4.20260107",
+    "pyarrow>=21.0.0,<22.0.0",
+]
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["cyber_connectors"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/cyber_connectors",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+]
 
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
