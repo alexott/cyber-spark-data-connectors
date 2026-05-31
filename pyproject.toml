@@ -113,6 +113,11 @@ ignore = [
 "F405",  # `assert_df_equality` may be undefined, or defined from star imports
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"cyber_connectors/MsSentinel.py" = ["N999", "N802", "N803"]
+"cyber_connectors/RestApi.py" = ["N999", "N802", "N803"]
+"cyber_connectors/Splunk.py" = ["N999", "N802", "N803"]
+
 # Allow fix for all enabled rules (when `--fix`) is provided.
 fixable = ["ALL"]
 unfixable = []
