@@ -256,7 +256,7 @@ uv run mypy cyber_connectors/
 
 ## Important Notes
 
-- **Python version**: 3.9-3.14 (defined in `pyproject.toml`)
+- **Python version**: 3.10-3.14 (defined in `pyproject.toml`)
 - **Spark version**: 4.0.1+ required (PySpark DataSource API)
 - **Dependencies**: Keep minimal - only add if critically needed
 - **Never use direct `python` commands**: Always use `uv run python`
