@@ -3,7 +3,7 @@ name = "cyber-spark-data-connectors"
 version = "0.0.7"
 description = "Cybersecurity-related custom data connectors for Spark (readers and writers)."
 readme = "README.md"
-requires-python = ">=3.9,<3.15"
+requires-python = ">=3.10,<3.15"
 authors = [
     { name = "Alex Ott", email = "alexott@gmail.com" }
 ]
@@ -90,7 +90,7 @@ line-length = 120
 indent-width = 4
 
 # Assume Python 3.8
-target-version = "py38"
+target-version = "py310"
 
 [tool.ruff.lint]
 # Enable Pyflakes (`F`) and a subset of the pycodestyle (`E`)  codes by default.
