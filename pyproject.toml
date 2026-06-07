@@ -23,7 +23,7 @@ Issues = "https://github.com/alexott/cyber-spark-data-connectors/issues"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.4.2,<9.0.0",
+    "pytest>=8.4.2,<10.0.0",
     "pytest-cov>=7.0.0,<8.0.0",
     "pytest-spark>=0.8.0,<0.9.0",
     "ruff>=0.15.0,<0.16.0",
