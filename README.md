@@ -452,6 +452,7 @@ Supported read options:
   - `start_time` (string) - Start time in ISO 8601 format (e.g., "2024-01-01T00:00:00Z"). If provided without `end_time`, queries from `start_time` to current time
   - `end_time` (string, optional) - End time in ISO 8601 format. Only valid when `start_time` is specified
   - **Note**: `timespan` and `start_time/end_time` are mutually exclusive - choose one approach
+  - **Note**: the `"earliest"` / `"latest"` aliases for `start_time` are only supported for streaming reads; batch reads require an explicit ISO 8601 timestamp or `timespan`
 - **Authentication options (choose one):**
   - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
   - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
@@ -465,6 +466,8 @@ Supported read options:
 - `max_retries` (int, optional, default: 5) - Maximum retry attempts for HTTP 429 throttling errors
 - `initial_backoff` (float, optional, default: 1.0) - Initial backoff time in seconds for retries (uses exponential backoff)
 - `min_partition_seconds` (int, optional, default: 60) - Minimum partition duration in seconds when subdividing large result sets
+- `result_size_limit` (int, optional, default: 500000) - Row count at which a result is treated as truncated by the Azure Monitor query cap and the time range is subdivided
+- `deduplicate_column_case` (bool, optional, default: false) - Log Analytics allows columns whose names differ only by case (e.g. `EventTimestamp_s` and `eventTimestamp_s`, common in `AzureDiagnostics`), but Spark/Delta requires column names to be unique case-insensitively. When true, later case-insensitive collisions are renamed with a numeric suffix (e.g. `eventTimestamp_s_2`) consistently across schema inference and reads. Prefer projecting only the columns you need in the query when possible.
 
 **KQL Query Examples:**
 
@@ -620,20 +623,25 @@ Supported streaming read options:
   - `"latest"` (default) - Start from current time (monitor new data)
   - `"earliest"` - Automatically detect and start from the earliest timestamp in the data
   - ISO 8601 timestamp (e.g., "2024-01-01T00:00:00Z") - Start from a specific time
-- `timestamp_column` (string, optional, default: "TimeGenerated") - Column name to use for timestamp when `start_time="earliest"` is specified
+- `timestamp_column` (string, optional, default: "TimeGenerated") - Event-timestamp column used to bound each partition (half-open filter) and to detect the earliest timestamp when `start_time="earliest"`. Must be present in the query results.
 - `partition_duration` (int, optional, default: 3600) - Duration in seconds for each partition (controls parallelism)
+- `safety_lag_seconds` (int, optional, default: 0) - How far behind "now" each micro-batch stops. Log Analytics has ingestion latency: data with a given `TimeGenerated` only becomes queryable minutes after the event occurred. Querying up to `now` skips not-yet-ingested rows *permanently*. Set this to at least your workspace's typical ingestion delay (commonly 300 seconds or more) to avoid missing late-arriving data.
+- `max_catchup_seconds` (int, optional, default: 3600) - Maximum event-time span a single micro-batch may advance. A large backlog (initial catch-up from a past `start_time`, or recovery after downtime) is drained across many bounded micro-batches instead of one oversized batch that can exhaust cluster memory. Set `0` to disable bounding. For a large one-time backfill, prefer `.trigger(availableNow=True)`.
+- `result_size_limit` (int, optional, default: 500000) - Row count at which a query result is assumed to be truncated by the Azure Monitor query cap and the time range is subdivided. Lower it only if your workspace enforces a smaller cap.
+- `deduplicate_column_case` (bool, optional, default: false) - Rename columns that collide case-insensitively (e.g. `EventTimestamp_s` / `eventTimestamp_s`) so the result can be written to a Delta table. See the batch read options above for details.
 - **Authentication options (choose one):**
   - `databricks_credential` (string) - Name of Unity Catalog service credential to use for authentication. Recommended when running on Databricks.
   - `azure_default_credential` (boolean, default: false) - If true, use Azure DefaultAzureCredential (managed identity, environment, etc.)
   - `tenant_id`, `client_id`, `client_secret` (strings) - Azure Service Principal credentials. All three are required if using this method.
 - `azure_cloud` (string, optional, default: "public") - Azure cloud environment ("public", "government", or "china")
-- `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints
+- `checkpointLocation` (string, required) - Directory path for Spark streaming checkpoints. Use a **stable, durable** path (e.g. a UC Volume) and do **not** delete it between restarts - clearing it makes the stream replay from `start_time` and re-append already-ingested data (duplicates).
 
 **Important notes for streaming:**
 
 - The reader automatically tracks the timestamp of the last processed data in checkpoints
 - Time ranges are split into partitions based on `partition_duration` for parallel processing
-- The query should NOT include time filters (e.g., `where TimeGenerated > ago(1d)`) - the reader adds these automatically based on offsets
+- Each partition is bounded by a **half-open** filter `<timestamp_column> >= start AND <timestamp_column> < end` appended to the query (no query API `timespan`). Consecutive partitions and micro-batches are contiguous - a row is read in exactly one batch even when many rows share the same timestamp - so no rows are lost at boundaries or double-counted.
+- The query must therefore keep the `timestamp_column` (default `TimeGenerated`) available (do not aggregate or rename it away), and must NOT include its own time filter (e.g., `where TimeGenerated > ago(1d)`) - that would **intersect** with the injected range and silently drop data. Use `timestamp_column` to point at a different column when needed.
 - Use `start_time: "latest"` to begin streaming from the current time (useful for monitoring real-time data)
 - Use `start_time: "earliest"` to automatically detect and start from the earliest timestamp in the data
 
