@@ -1,6 +1,7 @@
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from typing import cast
 
 from azure.monitor.ingestion import LogsIngestionClient
 from pyspark.sql.datasource import (
@@ -114,9 +115,12 @@ def _get_credential_from_options(
     """
     # Priority 1: Databricks Unity Catalog service credential
     if databricks_credential:
-        import databricks.service_credentials
+        try:
+            import databricks.service_credentials as service_credentials  # type: ignore[import-not-found]
+        except ImportError as err:
+            raise ImportError("databricks.service_credentials is required for databricks_credential auth") from err
 
-        return databricks.service_credentials.getServiceCredentialsProvider(databricks_credential)
+        return service_credentials.getServiceCredentialsProvider(databricks_credential)
 
     # Priority 2: Azure DefaultAzureCredential (for managed identity, etc.)
     if azure_default_credential:
@@ -180,6 +184,12 @@ def _parse_time_range(timespan=None, start_time=None, end_time=None):
         else:
             raise ValueError(f"Invalid timespan format: {timespan}")
     elif start_time:
+        if start_time.lower() in ("earliest", "latest"):
+            raise ValueError(
+                f"start_time='{start_time}' is only supported for streaming reads. "
+                "For batch reads, provide an ISO 8601 timestamp (e.g. '2024-01-01T00:00:00Z') "
+                "or a 'timespan' (e.g. 'P1D')."
+            )
         start_time_val = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
         if end_time:
             end_time_val = datetime.fromisoformat(end_time.replace("Z", "+00:00"))
@@ -188,6 +198,37 @@ def _parse_time_range(timespan=None, start_time=None, end_time=None):
         return (start_time_val, end_time_val)
     else:
         raise Exception("Either 'timespan' or 'start_time' must be provided")
+
+
+def _dedupe_column_names(columns):
+    """Rename columns that collide case-insensitively so they become unique.
+
+    Spark/Delta column names must be unique case-insensitively, but Log Analytics can
+    return columns that differ only in case (e.g. "EventTimestamp_s" and
+    "eventTimestamp_s") - common in catch-all tables like AzureDiagnostics. The first
+    occurrence keeps its name; later collisions get a numeric suffix (_2, _3, ...),
+    skipping any suffix that would itself collide. The result depends only on the input
+    order, so schema inference and reads produce identical names.
+
+    Args:
+        columns: Ordered list of column name strings
+
+    Returns:
+        list[str]: Column names unique when compared case-insensitively
+
+    """
+    seen: set[str] = set()
+    result = []
+    for name in columns:
+        candidate = name
+        if candidate.lower() in seen:
+            i = 2
+            while f"{name}_{i}".lower() in seen:
+                i += 1
+            candidate = f"{name}_{i}"
+        seen.add(candidate.lower())
+        result.append(candidate)
+    return result
 
 
 def _check_error_for_size_limit(error_obj):
@@ -515,7 +556,9 @@ def _convert_value_to_schema_type(value, spark_type):
             return value
 
     except (ValueError, TypeError) as e:
-        raise ValueError(f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}")
+        raise ValueError(
+            f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}"
+        ) from e
 
 
 @dataclass
@@ -696,17 +739,23 @@ class AzureMonitorDataSource(DataSource):
         if not table.columns or len(table.columns) == 0:
             raise Exception("Schema inference failed: query returned no columns")
 
+        # Resolve column names, de-duplicating case collisions if requested (Log Analytics
+        # allows names differing only by case; Delta requires them unique).
+        column_names = [str(col) for col in table.columns]
+        if self.options.get("deduplicate_column_case", "false").lower() == "true":
+            column_names = _dedupe_column_names(column_names)
+
         # Check if we have any rows to infer types from
         if not table.rows or len(table.rows) == 0:
             # No data to infer types from, use string type for all columns
-            fields = [StructField(str(col), StringType(), nullable=True) for col in table.columns]
+            fields = [StructField(name, StringType(), nullable=True) for name in column_names]
             return StructType(fields)
 
         # Infer schema from actual data in the first row
         first_row = table.rows[0]
         fields = []
 
-        for i, column_name in enumerate(table.columns):
+        for i, column_name in enumerate(column_names):
             # Get the value from the first row to infer type
             value = first_row[i] if i < len(first_row) else None
 
@@ -795,17 +844,23 @@ class AzureMonitorDataSource(DataSource):
         if not table.columns or len(table.columns) == 0:
             raise Exception("Schema inference failed: query returned no columns")
 
+        # Resolve column names, de-duplicating case collisions if requested (Log Analytics
+        # allows names differing only by case; Delta requires them unique).
+        column_names = [str(col) for col in table.columns]
+        if self.options.get("deduplicate_column_case", "false").lower() == "true":
+            column_names = _dedupe_column_names(column_names)
+
         # Check if we have any rows to infer types from
         if not table.rows or len(table.rows) == 0:
             # No data to infer types from, use string type for all columns
-            fields = [StructField(str(col), StringType(), nullable=True) for col in table.columns]
+            fields = [StructField(name, StringType(), nullable=True) for name in column_names]
             return StructType(fields)
 
         # Infer schema from actual data in the first row
         first_row = table.rows[0]
         fields = []
 
-        for i, column_name in enumerate(table.columns):
+        for i, column_name in enumerate(column_names):
             # Get the value from the first row to infer type
             value = first_row[i] if i < len(first_row) else None
 
@@ -865,8 +920,13 @@ class AzureMonitorDataSource(DataSource):
 
         assert query, "query is required"
 
-        # Parse time range using module-level function
-        timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
+        # Parse time range using module-level function.
+        # 'earliest'/'latest' are streaming aliases, not real timestamps; for schema
+        # inference we only need one sample row, so query all data (no time restriction).
+        if start_time and start_time.lower() in ("earliest", "latest") and not timespan:
+            timespan_value = None
+        else:
+            timespan_value = _parse_time_range(timespan=timespan, start_time=start_time, end_time=end_time)
 
         # Modify query to limit results to 1 row
         sample_query = query.strip()
@@ -1087,6 +1147,22 @@ class AzureMonitorReader:
         self.max_retries = int(options.get("max_retries", "5"))
         self.initial_backoff = float(options.get("initial_backoff", "1.0"))
         self.min_partition_seconds = int(options.get("min_partition_seconds", "60"))
+        # RC2: Azure Monitor caps a query at ~500k rows and may return a truncated result
+        # with SUCCESS status. A partition returning this many rows is assumed truncated
+        # and is subdivided rather than trusted as complete.
+        self.result_size_limit = int(options.get("result_size_limit", "500000"))
+        # Rename columns that collide case-insensitively (Log Analytics allows them, Delta
+        # does not). Applied consistently in schema inference and read. Default off.
+        self.deduplicate_column_case = options.get("deduplicate_column_case", "false").lower() == "true"
+
+        # Column carrying the event timestamp, used by the half-open read boundary.
+        self.timestamp_column = options.get("timestamp_column", "TimeGenerated")
+        # When True, read() bounds each partition with an explicit half-open KQL filter
+        # (col >= start AND col < end) and passes timespan=None, instead of Azure's
+        # inclusive/inclusive timespan. This makes adjacent partitions contiguous with no
+        # sub-microsecond gaps or tick-precision truncation, so every row is read exactly
+        # once even when many rows share a timestamp. Enabled for streaming reads.
+        self.half_open_boundaries = False
 
         # Store schema (provided by DataSource.schema())
         self._schema = schema
@@ -1107,12 +1183,23 @@ class AzureMonitorReader:
         # Import inside method for partition-level execution
         from azure.monitor.query import LogsQueryStatus
 
-        # Use partition's time range
-        timespan_value = (partition.start_time, partition.end_time)
+        # Determine how to bound the partition's time range.
+        if self.half_open_boundaries:
+            # Half-open [start, end) filter injected into the query; no timespan.
+            # Contiguous with adjacent partitions, tick-precise, counts each row once.
+            query = (
+                f"{self.query} | where {self.timestamp_column} >= datetime({partition.start_time.isoformat()}) "
+                f"and {self.timestamp_column} < datetime({partition.end_time.isoformat()})"
+            )
+            timespan_value = None
+        else:
+            # Legacy: rely on Azure's inclusive/inclusive timespan.
+            query = self.query
+            timespan_value = (partition.start_time, partition.end_time)
 
         # Execute query using unified function (handles both workspace and resource)
         response = _execute_logs_query(
-            query=self.query,
+            query=query,
             timespan=timespan_value,
             tenant_id=self.tenant_id,
             client_id=self.client_id,
@@ -1139,6 +1226,14 @@ class AzureMonitorReader:
                 if hasattr(response, "partial_error") and response.partial_error:
                     error_msg = f": {response.partial_error}"
                 raise Exception(f"Query failed with status {response.status}{error_msg}")
+
+        # RC2: a SUCCESS response at the row cap is silently truncated - Azure returns at
+        # most result_size_limit rows without a size-limit error. Subdivide instead of
+        # trusting it as complete (subdivision is safe even if the count was exact).
+        total_rows = sum(len(table.rows) for table in response.tables)
+        if total_rows >= self.result_size_limit:
+            yield from self._read_with_subdivision(partition)
+            return
 
         # Process successful response
         yield from self._process_response(response)
@@ -1198,15 +1293,19 @@ class AzureMonitorReader:
 
         # Process all tables in response
         for table in response.tables:
+            # Column names (real API returns strings; test mocks may use objects with .name)
+            column_names = [str(col) if isinstance(col, str) else str(col.name) for col in table.columns]
+            # Apply the same case de-duplication used during schema inference so row keys
+            # match the schema field names.
+            if self.deduplicate_column_case:
+                column_names = _dedupe_column_names(column_names)
+
             # Convert Azure Monitor rows to Spark Rows
-            # table.columns is always a list of strings (column names)
             for row_idx, row_data in enumerate(table.rows):
                 row_dict = {}
 
                 # First, process columns from the query results
-                for i, col in enumerate(table.columns):
-                    # Handle both string columns (real API) and objects with .name attribute (test mocks)
-                    column_name = str(col) if isinstance(col, str) else str(col.name)
+                for i, column_name in enumerate(column_names):
                     raw_value = row_data[i]
 
                     # If column is in schema, convert to expected type
@@ -1216,7 +1315,7 @@ class AzureMonitorReader:
                             converted_value = _convert_value_to_schema_type(raw_value, expected_type)
                             row_dict[column_name] = converted_value
                         except ValueError as e:
-                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}")
+                            raise ValueError(f"Row {row_idx}, column '{column_name}': {e}") from e
                     # Note: columns not in schema are ignored (not included in row)
 
                 # Second, add NULL values for schema columns that are not in query results
@@ -1276,6 +1375,9 @@ class AzureMonitorBatchReader(AzureMonitorReader, DataSourceReader):
             partitions.append(TimeRangePartition(partition_start, partition_end))
 
         return partitions
+
+    def read(self, partition):
+        return super().read(cast(TimeRangePartition, partition))
 
 
 class AzureMonitorOffset:
@@ -1372,11 +1474,28 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
                 self.start_time = start_time
             except (ValueError, AttributeError) as e:
                 raise ValueError(
-                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format (e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
+                    f"Invalid start_time format: {start_time}. Expected ISO 8601 format "
+                    "(e.g., '2024-01-01T00:00:00Z') or 'latest' or 'earliest'"
                 ) from e
 
         # Partition duration in seconds (default 1 hour)
         self.partition_duration = int(options.get("partition_duration", "3600"))
+
+        # RC1: lag behind "now" to allow for Log Analytics ingestion latency.
+        # Data with TimeGenerated inside the lag window may not be queryable yet;
+        # querying it too early skips it permanently. Default 0 (backward compatible).
+        self.safety_lag_seconds = int(options.get("safety_lag_seconds", "0"))
+        # RC5: maximum event-time span a single micro-batch may advance. A large
+        # backlog (initial catch-up, or recovery after downtime) is drained across
+        # many completable batches instead of one oversized batch that OOMs.
+        # 0 disables bounding.
+        self.max_catchup_seconds = int(options.get("max_catchup_seconds", "3600"))
+        # Last planned offset timestamp (ISO str), used to bound the catch-up window.
+        self._current_offset = None
+
+        # Streaming reads use half-open [start, end) boundaries so consecutive micro-batches
+        # and their partitions are contiguous with no gaps or overlaps (see read()).
+        self.half_open_boundaries = True
 
     def _get_earliest_timestamp(self):
         """Query to find the earliest timestamp in the data.
@@ -1448,34 +1567,53 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         return datetime.now(timezone.utc).isoformat()
 
     def initialOffset(self):
-        """Return the initial offset (start time minus 1 microsecond).
+        """Return the initial offset (the configured start time, unadjusted).
 
-        The offset is adjusted by -1 microsecond to compensate for the +1 microsecond
-        added in partitions() method. This prevents overlap between consecutive batches.
+        With half-open [start, end) partition boundaries no microsecond fudging is
+        needed: the start is inclusive, so the first batch begins exactly at start_time.
 
         Returns:
-            JSON string representation of AzureMonitorOffset with the adjusted start time
+            JSON string representation of AzureMonitorOffset with the start time
 
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime
 
-        # Parse the start time and subtract 1 microsecond
-        # This compensates for the +1µs added in partitions() to prevent batch overlap
         start_dt = datetime.fromisoformat(self.start_time.replace("Z", "+00:00"))
-        adjusted_start = start_dt - timedelta(microseconds=1)
-        return AzureMonitorOffset(adjusted_start.isoformat()).json()
+        # Seed the tracked offset so the first micro-batch's catch-up window is bounded (RC5)
+        self._current_offset = start_dt.isoformat()
+        return AzureMonitorOffset(start_dt.isoformat()).json()
 
     def latestOffset(self):
-        """Return the latest offset (current time).
+        """Return the latest offset to read up to.
+
+        Applies two safeguards:
+        - RC1: stays ``safety_lag_seconds`` behind "now" so not-yet-ingested data is
+          not skipped.
+        - RC5: advances at most ``max_catchup_seconds`` beyond the last planned offset,
+          so a large backlog is drained across many bounded micro-batches instead of one
+          oversized batch. (On a fresh restart the committed offset is unknown until the
+          first ``partitions()`` call, so that first batch is not bounded here - use
+          ``Trigger.AvailableNow`` for large backfills.)
 
         Returns:
-            JSON string representation of AzureMonitorOffset with the current UTC timestamp
+            JSON string representation of AzureMonitorOffset
 
         """
-        from datetime import datetime, timezone
+        from datetime import datetime, timedelta, timezone
 
-        current_time = datetime.now(timezone.utc).isoformat()
-        return AzureMonitorOffset(current_time).json()
+        end_time = datetime.now(timezone.utc) - timedelta(seconds=self.safety_lag_seconds)
+
+        if self._current_offset is not None:
+            base = datetime.fromisoformat(self._current_offset.replace("Z", "+00:00"))
+            if self.max_catchup_seconds > 0:
+                capped = base + timedelta(seconds=self.max_catchup_seconds)
+                if capped < end_time:
+                    end_time = capped
+            # Never move the offset backwards (e.g. large safety lag near stream start)
+            if end_time < base:
+                end_time = base
+
+        return AzureMonitorOffset(end_time.isoformat()).json()
 
     def partitions(self, start, end):
         """Create partitions for the time range between start and end offsets.
@@ -1496,15 +1634,14 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         start_offset = AzureMonitorOffset.from_json(start)
         end_offset = AzureMonitorOffset.from_json(end)
 
-        # Parse timestamps
+        # Track the planned end so the next latestOffset() bounds its catch-up window (RC5)
+        self._current_offset = end_offset.timestamp
+
+        # Parse timestamps. Boundaries are half-open [start, end): the start is inclusive
+        # and the end exclusive (see read()), so consecutive batches and partitions are
+        # contiguous with no microsecond adjustments and no gaps or overlaps.
         start_time = datetime.fromisoformat(start_offset.timestamp.replace("Z", "+00:00"))
         end_time = datetime.fromisoformat(end_offset.timestamp.replace("Z", "+00:00"))
-
-        # Add 1 microsecond to start to prevent overlap with previous batch's end
-        # This works with the -1µs adjustment in initialOffset() to ensure:
-        # - Initial batch: (start - 1µs) + 1µs = start (correct original start)
-        # - Subsequent batches: previous_end + 1µs (no overlap with previous batch)
-        start_time = start_time + timedelta(microseconds=1)
 
         # Calculate total duration
         total_duration = (end_time - start_time).total_seconds()
@@ -1513,7 +1650,8 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         if total_duration <= self.partition_duration:
             return [TimeRangePartition(start_time, end_time)]
 
-        # Split into fixed-duration partitions
+        # Split into fixed-duration partitions. Each partition ends exactly where the next
+        # begins; the half-open comparison keeps a boundary row in exactly one partition.
         partitions = []
         current_start = start_time
         partition_delta = timedelta(seconds=self.partition_duration)
@@ -1521,10 +1659,12 @@ class AzureMonitorStreamReader(AzureMonitorReader, DataSourceStreamReader):
         while current_start < end_time:
             current_end = min(current_start + partition_delta, end_time)
             partitions.append(TimeRangePartition(current_start, current_end))
-            # Next partition starts 1 microsecond after current partition ends to avoid overlap
-            current_start = current_end + timedelta(microseconds=1)
+            current_start = current_end
 
         return partitions
+
+    def read(self, partition):
+        return super().read(cast(TimeRangePartition, partition))
 
     def commit(self, end):
         """Called when a batch is successfully processed.
@@ -1582,7 +1722,7 @@ class AzureMonitorWriter:
             s.upload(rule_id=self.dcr_id, stream_name=self.dcs, logs=msgs)
 
     def write(self, iterator):
-        """Writes the data, then returns the commit message of that partition. Library imports must be within the method."""
+        """Write the data and return the commit message for that partition."""
         import json
 
         from azure.monitor.ingestion import LogsIngestionClient
@@ -1606,6 +1746,8 @@ class AzureMonitorWriter:
         msgs = []
 
         context = TaskContext.get()
+        if context is None:
+            raise RuntimeError("TaskContext is not available")
         partition_id = context.partitionId()
         cnt = 0
         for row in iterator:
@@ -1631,9 +1773,9 @@ class AzureMonitorStreamWriter(AzureMonitorWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it."""
+        """Handle a successfully written streaming batch."""
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it."""
+        """Handle a failed streaming batch."""
         pass

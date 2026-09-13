@@ -1,10 +1,9 @@
-"""Public data source exports."""
+"""Public data source exports for the cyber_connectors package."""
 
-from cyber_connectors.MsSentinel import AzureMonitorDataSource as AzureMonitorDataSource
-from cyber_connectors.MsSentinel import MicrosoftSentinelDataSource as MicrosoftSentinelDataSource
-from cyber_connectors.Pcap import PcapDataSource as PcapDataSource
-from cyber_connectors.RestApi import RestApiDataSource as RestApiDataSource
-from cyber_connectors.Splunk import SplunkDataSource as SplunkDataSource
+from cyber_connectors.MsSentinel import AzureMonitorDataSource, MicrosoftSentinelDataSource
+from cyber_connectors.Pcap import PcapDataSource
+from cyber_connectors.RestApi import RestApiDataSource
+from cyber_connectors.Splunk import SplunkDataSource
 
 __all__ = [
     "AzureMonitorDataSource",

@@ -80,31 +80,31 @@ The test suite covers the following data sources:
 
 ### Run all tests
 ```bash
-poetry run pytest tests/
+uv run pytest tests/
 ```
 
 ### Run tests with verbose output
 ```bash
-poetry run pytest tests/ -v
+uv run pytest tests/ -v
 ```
 
 ### Run tests with coverage
 ```bash
-poetry run pytest tests/ --cov=cyber_connectors --cov-report=term-missing
+uv run pytest tests/ --cov=cyber_connectors --cov-report=term-missing
 ```
 
 ### Run specific test file
 ```bash
-poetry run pytest tests/test_splunk.py
-poetry run pytest tests/test_restapi.py
-poetry run pytest tests/test_mssentinel.py
-poetry run pytest tests/test_common.py
+uv run pytest tests/test_splunk.py
+uv run pytest tests/test_restapi.py
+uv run pytest tests/test_mssentinel.py
+uv run pytest tests/test_common.py
 ```
 
 ### Run specific test class or method
 ```bash
-poetry run pytest tests/test_splunk.py::TestSplunkDataSource
-poetry run pytest tests/test_splunk.py::TestSplunkHecWriter::test_write_basic
+uv run pytest tests/test_splunk.py::TestSplunkDataSource
+uv run pytest tests/test_splunk.py::TestSplunkHecWriter::test_write_basic
 ```
 
 ## Test Coverage Summary
@@ -136,7 +136,7 @@ The test suite requires:
 - pytest-spark (for Spark testing utilities)
 - unittest.mock (standard library)
 
-All dependencies are managed through Poetry and are installed automatically when running tests in the Poetry environment.
+All dependencies are managed through `uv` and are installed automatically when running `uv sync`.
 
 ### pytest-spark Fixtures
 

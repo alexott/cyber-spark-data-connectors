@@ -3,7 +3,7 @@ import re
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, cast
 
 from pyspark.sql.datasource import (
     DataSource,
@@ -160,7 +160,9 @@ def _convert_value_to_schema_type(value, spark_type):
             return value
 
     except (ValueError, TypeError) as e:
-        raise ValueError(f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}")
+        raise ValueError(
+            f"Failed to convert value '{value}' (type: {type(value).__name__}) to {spark_type}: {e}"
+        ) from e
 
 
 @dataclass
@@ -465,13 +467,14 @@ class SplunkHecWriter:
 
     def write(self, iterator: Iterator[Row]):
         """Writes the data, then returns the commit message of that partition."""
-        
         # Library imports must be within the method.
         import datetime
 
         from pyspark import TaskContext
 
         context = TaskContext.get()
+        if context is None:
+            raise RuntimeError("TaskContext is not available")
         partition_id = context.partitionId()
         cnt = 0
         s = get_http_session(additional_headers={"Authorization": f"Splunk {self.token}"}, retry_on_post=True)
@@ -532,11 +535,11 @@ class SplunkHecStreamWriter(SplunkHecWriter, DataSourceStreamWriter):
         super().__init__(options)
 
     def commit(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` when all write tasks have succeeded, then decides what to do with it."""
+        """Handle a successfully written streaming batch."""
         pass
 
     def abort(self, messages: list[WriterCommitMessage | None], batchId: int) -> None:
-        """Receives a sequence of :class:`WriterCommitMessage` from successful tasks when some other tasks have failed, then decides what to do with it."""
+        """Handle a failed streaming batch."""
         pass
 
 
@@ -689,7 +692,7 @@ class SplunkReader:
                     row_dict[field_name] = converted_value
                 except ValueError as e:
                     if self.mode == "FAILFAST":
-                        raise ValueError(f"Column '{field_name}': {e}")
+                        raise ValueError(f"Column '{field_name}': {e}") from e
                     else:
                         # PERMISSIVE mode: set to null on conversion error
                         row_dict[field_name] = None
@@ -751,10 +754,7 @@ class SplunkBatchReader(SplunkReader, DataSourceReader):
         # Partitioning options
         self.num_partitions = int(options.get("num_partitions", "1"))
         partition_duration = options.get("partition_duration")
-        if partition_duration:
-            self.partition_duration = int(partition_duration)
-        else:
-            self.partition_duration = None
+        self.partition_duration: int | None = int(partition_duration) if partition_duration else None
 
     def partitions(self):
         """Generate list of non-overlapping time range partitions.
@@ -793,6 +793,9 @@ class SplunkBatchReader(SplunkReader, DataSourceReader):
                 partitions.append(SplunkTimeRangePartition(partition_start, partition_end))
 
             return partitions
+
+    def read(self, partition):
+        return super().read(cast(SplunkTimeRangePartition, partition))
 
 
 class SplunkStreamReader(SplunkReader, DataSourceStreamReader):
@@ -901,3 +904,6 @@ class SplunkStreamReader(SplunkReader, DataSourceStreamReader):
             current_start = current_end
 
         return partitions
+
+    def read(self, partition):
+        return super().read(cast(SplunkTimeRangePartition, partition))

@@ -2506,3 +2506,248 @@ class TestAzureMonitorResourceQuery:
         with pytest.raises(ValueError, match="Must specify either workspace_id or resource_id"):
             ds.schema()
 
+
+
+class TestStartTimeEarliestLatest:
+    """RC4: 'earliest'/'latest' start_time handling for schema inference and batch reads."""
+
+    def _opts(self, **overrides):
+        opts = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+        opts.update(overrides)
+        return opts
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_schema_inference_with_latest_start_time(self, mock_query):
+        """Schema inference must not crash when start_time='latest' (used by streaming)."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["TimeGenerated"]
+        tbl.rows = [["2024-01-01T00:00:00Z"]]
+        resp.tables = [tbl]
+        mock_query.return_value = resp
+
+        ds = AzureMonitorDataSource(options=self._opts(start_time="latest"))
+        schema = ds.schema()
+
+        assert schema is not None
+        # sample query for schema inference is not restricted to a bogus time range
+        assert mock_query.call_args[1]["timespan"] is None
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_schema_inference_with_earliest_start_time(self, mock_query):
+        """Schema inference must not crash when start_time='earliest'."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["TimeGenerated"]
+        tbl.rows = [["2024-01-01T00:00:00Z"]]
+        resp.tables = [tbl]
+        mock_query.return_value = resp
+
+        ds = AzureMonitorDataSource(options=self._opts(start_time="earliest"))
+        schema = ds.schema()
+
+        assert schema is not None
+        assert mock_query.call_args[1]["timespan"] is None
+
+    def test_batch_reader_rejects_earliest_with_clear_error(self):
+        """Batch reads don't support 'earliest'/'latest'; error must be actionable."""
+        schema = StructType([StructField("TimeGenerated", StringType(), True)])
+        with pytest.raises(ValueError, match="streaming"):
+            AzureMonitorBatchReader(self._opts(start_time="earliest"), schema)
+
+
+class TestResultSizeCapTruncation:
+    """RC2: a SUCCESS response at the API row cap is silent truncation and must subdivide."""
+
+    def _opts(self, **overrides):
+        opts = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+        opts.update(overrides)
+        return opts
+
+    @pytest.fixture
+    def basic_schema(self):
+        """Basic schema for testing."""
+        return StructType([StructField("TestCol", StringType(), True)])
+
+    def test_default_result_size_limit(self, basic_schema):
+        """Default result_size_limit matches the Azure Monitor query row cap."""
+        reader = AzureMonitorBatchReader(self._opts(), basic_schema)
+        assert reader.result_size_limit == 500000
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_success_at_row_cap_triggers_subdivision(self, mock_credential, mock_client, basic_schema):
+        """A SUCCESS whose row count hits the cap is treated as truncated and subdivided."""
+        from azure.monitor.query import LogsQueryStatus
+
+        capped = Mock()
+        capped.status = LogsQueryStatus.SUCCESS
+        capped_table = Mock()
+        capped_table.columns = ["TestCol"]
+        capped_table.rows = [["A"], ["B"]]  # == result_size_limit (2) -> truncated
+        capped.tables = [capped_table]
+
+        def _small(value):
+            resp = Mock()
+            resp.status = LogsQueryStatus.SUCCESS
+            tbl = Mock()
+            tbl.columns = ["TestCol"]
+            tbl.rows = [[value]]
+            resp.tables = [tbl]
+            return resp
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.side_effect = [capped, _small("C"), _small("D")]
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(self._opts(result_size_limit="2"), basic_schema)
+        rows = list(reader.read(reader.partitions()[0]))
+
+        # Subdivided instead of trusting the truncated response
+        assert mock_client_instance.query_workspace.call_count == 3
+        assert [r.TestCol for r in rows] == ["C", "D"]
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_success_below_cap_no_subdivision(self, mock_credential, mock_client, basic_schema):
+        """A SUCCESS below the cap is complete and must not be subdivided."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["TestCol"]
+        tbl.rows = [["only"]]
+        resp.tables = [tbl]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = resp
+        mock_client.return_value = mock_client_instance
+
+        reader = AzureMonitorBatchReader(self._opts(result_size_limit="1000"), basic_schema)
+        rows = list(reader.read(reader.partitions()[0]))
+
+        assert mock_client_instance.query_workspace.call_count == 1
+        assert [r.TestCol for r in rows] == ["only"]
+
+
+class TestDeduplicateColumnCase:
+    """Handle Log Analytics columns that collide case-insensitively (Delta requires unique names)."""
+
+    def _opts(self, **overrides):
+        opts = {
+            "workspace_id": "test-workspace-id",
+            "query": "AzureActivity",
+            "timespan": "P1D",
+            "tenant_id": "test-tenant",
+            "client_id": "test-client",
+            "client_secret": "test-secret",
+        }
+        opts.update(overrides)
+        return opts
+
+    def test_dedupe_helper_renames_case_collisions(self):
+        """Later case-insensitive duplicates get a numeric suffix; first keeps its name."""
+        from cyber_connectors.MsSentinel import _dedupe_column_names
+
+        assert _dedupe_column_names(["EventTimestamp_s", "eventTimestamp_s"]) == [
+            "EventTimestamp_s",
+            "eventTimestamp_s_2",
+        ]
+
+    def test_dedupe_helper_no_collision_unchanged(self):
+        """Columns that are already unique are returned unchanged."""
+        from cyber_connectors.MsSentinel import _dedupe_column_names
+
+        assert _dedupe_column_names(["a", "b", "c"]) == ["a", "b", "c"]
+
+    def test_dedupe_helper_triple_collision(self):
+        """Three colliding names get suffixed _2, _3."""
+        from cyber_connectors.MsSentinel import _dedupe_column_names
+
+        assert _dedupe_column_names(["x", "X", "x"]) == ["x", "X_2", "x_3"]
+
+    def test_dedupe_helper_avoids_generated_collision(self):
+        """A generated suffix must not clash with an existing column."""
+        from cyber_connectors.MsSentinel import _dedupe_column_names
+
+        assert _dedupe_column_names(["A", "a", "A_2"]) == ["A", "a_2", "A_2_2"]
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_schema_inference_dedupes_when_enabled(self, mock_query):
+        """Schema inference renames colliding columns when the option is set."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["Val_s", "val_s"]
+        tbl.rows = [["a", "b"]]
+        resp.tables = [tbl]
+        mock_query.return_value = resp
+
+        ds = AzureMonitorDataSource(options=self._opts(deduplicate_column_case="true"))
+        schema = ds.schema()
+        assert [f.name for f in schema.fields] == ["Val_s", "val_s_2"]
+
+    @patch("cyber_connectors.MsSentinel._execute_logs_query")
+    def test_schema_inference_keeps_collisions_by_default(self, mock_query):
+        """Default behavior (option off) keeps both colliding columns unchanged."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["Val_s", "val_s"]
+        tbl.rows = [["a", "b"]]
+        resp.tables = [tbl]
+        mock_query.return_value = resp
+
+        ds = AzureMonitorDataSource(options=self._opts())
+        schema = ds.schema()
+        assert [f.name for f in schema.fields] == ["Val_s", "val_s"]
+
+    @patch("azure.monitor.query.LogsQueryClient")
+    @patch("azure.identity.ClientSecretCredential")
+    def test_read_dedupes_row_keys_when_enabled(self, mock_credential, mock_client):
+        """Read maps values onto the deduped column names so both collide-columns survive."""
+        from azure.monitor.query import LogsQueryStatus
+
+        resp = Mock()
+        resp.status = LogsQueryStatus.SUCCESS
+        tbl = Mock()
+        tbl.columns = ["Val_s", "val_s"]
+        tbl.rows = [["first", "second"]]
+        resp.tables = [tbl]
+
+        mock_client_instance = Mock()
+        mock_client_instance.query_workspace.return_value = resp
+        mock_client.return_value = mock_client_instance
+
+        schema = StructType(
+            [StructField("Val_s", StringType(), True), StructField("val_s_2", StringType(), True)]
+        )
+        reader = AzureMonitorBatchReader(self._opts(deduplicate_column_case="true"), schema)
+        rows = list(reader.read(reader.partitions()[0]))
+
+        assert rows[0]["Val_s"] == "first"
+        assert rows[0]["val_s_2"] == "second"
