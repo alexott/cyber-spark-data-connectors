@@ -247,6 +247,169 @@ class TestSplunkHecWriter:
         assert mock_session.post.call_count == 3
 
 
+def _hec_response(status_code=200, text='{"text":"Success","code":0}'):
+    response = Mock()
+    response.status_code = status_code
+    response.text = text
+    return response
+
+
+@pytest.fixture
+def hec_session():
+    """Patch TaskContext and HTTP session; yields the mocked session."""
+    with (
+        patch("pyspark.TaskContext") as mock_task_context,
+        patch("cyber_connectors.Splunk.get_http_session") as mock_get_session,
+    ):
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+        mock_session = Mock()
+        mock_session.post.return_value = _hec_response()
+        mock_get_session.return_value = mock_session
+        mock_session.get_http_session = mock_get_session
+        yield mock_session
+
+
+def _sent_events(mock_session):
+    """All HEC payloads sent via data=..., in order."""
+    events = []
+    for call in mock_session.post.call_args_list:
+        if "data" in call[1]:
+            events.extend(json.loads(line) for line in call[1]["data"].split("\n"))
+    return events
+
+
+class TestSplunkHecWriterHardening:
+    """Error handling, payload shape and acknowledgement options of the HEC writer."""
+
+    def test_write_raises_on_error_status(self, hec_session, basic_options):
+        """A non-2xx HEC response fails the write instead of losing data silently."""
+        hec_session.post.return_value = _hec_response(403, '{"text":"Invalid token","code":4}')
+        writer = SplunkHecBatchWriter(basic_options)
+        with pytest.raises(RuntimeError, match="403.*Invalid token"):
+            writer.write(iter([Row(id=1)]))
+
+    def test_write_nested_struct_is_object(self, hec_session, basic_options):
+        """Nested rows serialize as JSON objects, not as arrays."""
+        writer = SplunkHecBatchWriter(basic_options)
+        writer.write(iter([Row(id=1, device=Row(hostname="h1", ip="10.0.0.1"))]))
+        event = _sent_events(hec_session)[0]["event"]
+        assert event["device"] == {"hostname": "h1", "ip": "10.0.0.1"}
+
+    def test_remove_time_column(self, hec_session):
+        """remove_time_column drops the time column from the event body but keeps HEC time."""
+        options = {"url": "http://localhost:8088", "token": "t", "time_column": "_time", "remove_time_column": "true"}
+        ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        SplunkHecBatchWriter(options).write(iter([Row(_time=ts, user="alice")]))
+        payload = _sent_events(hec_session)[0]
+        assert payload["time"] == ts.timestamp()
+        assert payload["event"] == {"user": "alice"}
+
+    def test_time_column_kept_by_default(self, hec_session):
+        """Without remove_time_column the time column stays in the event body."""
+        options = {"url": "http://localhost:8088", "token": "t", "time_column": "_time"}
+        ts = datetime(2024, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+        SplunkHecBatchWriter(options).write(iter([Row(_time=ts, user="alice")]))
+        assert "_time" in _sent_events(hec_session)[0]["event"]
+
+    def test_host_and_source_columns(self, hec_session):
+        """Per-row host/source come from columns; null falls back to the static option."""
+        options = {
+            "url": "http://localhost:8088",
+            "token": "t",
+            "host": "static-host",
+            "source": "static-source",
+            "host_column": "dest",
+            "source_column": "src_table",
+        }
+        rows = [Row(dest="h1", src_table="gold.web"), Row(dest=None, src_table=None)]
+        SplunkHecBatchWriter(options).write(iter(rows))
+        first, second = _sent_events(hec_session)
+        assert (first["host"], first["source"]) == ("h1", "gold.web")
+        assert (second["host"], second["source"]) == ("static-host", "static-source")
+
+    def test_max_payload_bytes_splits_requests(self, hec_session):
+        """max_payload_bytes flushes before the request body gets too large."""
+        options = {"url": "http://localhost:8088", "token": "t", "batch_size": "100", "max_payload_bytes": "400"}
+        rows = [Row(id=i, msg="x" * 100) for i in range(6)]
+        commit_msg = SplunkHecBatchWriter(options).write(iter(rows))
+        assert commit_msg.count == 6
+        bodies = [c[1]["data"] for c in hec_session.post.call_args_list]
+        assert len(bodies) > 1
+        assert all(len(b.encode("utf-8")) <= 400 for b in bodies)
+        assert len(_sent_events(hec_session)) == 6
+
+    def test_max_payload_bytes_default_no_limit(self, hec_session, basic_options):
+        """By default only batch_size controls flushing."""
+        rows = [Row(id=i, msg="x" * 1000) for i in range(10)]
+        SplunkHecBatchWriter(basic_options).write(iter(rows))
+        assert hec_session.post.call_count == 1
+
+    def test_use_ack_requires_collector_url(self):
+        """use_ack needs a /services/collector URL to derive the ack endpoint."""
+        with pytest.raises(ValueError, match="/services/collector"):
+            SplunkHecBatchWriter({"url": "http://localhost:8088/custom", "token": "t", "use_ack": "true"})
+
+    def test_use_ack_derives_ack_url(self):
+        """The ack endpoint sits next to the event endpoint."""
+        writer = SplunkHecBatchWriter(
+            {"url": "https://splunk:8088/services/collector/event", "token": "t", "use_ack": "true"}
+        )
+        assert writer.ack_url == "https://splunk:8088/services/collector/ack"
+
+    def test_use_ack_waits_for_acks(self, hec_session):
+        """With use_ack the write polls the ack endpoint until every ackId is acknowledged."""
+        ack_url = "http://localhost:8088/services/collector/ack"
+        hec_session.post.side_effect = [
+            _hec_response(text='{"text":"Success","code":0,"ackId":0}'),
+            _hec_response(text='{"text":"Success","code":0,"ackId":1}'),
+            _hec_response(text='{"acks":{"0":true,"1":false}}'),
+            _hec_response(text='{"acks":{"1":true}}'),
+        ]
+        options = {
+            "url": "http://localhost:8088/services/collector/event",
+            "token": "t",
+            "batch_size": "1",
+            "use_ack": "true",
+            "ack_poll_interval": "0",
+        }
+        commit_msg = SplunkHecBatchWriter(options).write(iter([Row(id=1), Row(id=2)]))
+        assert commit_msg.count == 2
+        ack_calls = [c for c in hec_session.post.call_args_list if c[0][0] == ack_url]
+        assert [c[1]["json"] for c in ack_calls] == [{"acks": [0, 1]}, {"acks": [1]}]
+        headers = hec_session.get_http_session.call_args[1]["additional_headers"]
+        assert "X-Splunk-Request-Channel" in headers
+
+    def test_use_ack_timeout_raises(self, hec_session):
+        """Unacknowledged requests fail the write after ack_timeout."""
+        hec_session.post.side_effect = [
+            _hec_response(text='{"text":"Success","code":0,"ackId":0}'),
+            _hec_response(text='{"acks":{"0":false}}'),
+        ]
+        options = {
+            "url": "http://localhost:8088/services/collector/event",
+            "token": "t",
+            "use_ack": "true",
+            "ack_timeout": "0",
+            "ack_poll_interval": "0",
+        }
+        with pytest.raises(RuntimeError, match="did not acknowledge 1"):
+            SplunkHecBatchWriter(options).write(iter([Row(id=1)]))
+
+    def test_use_ack_missing_ack_id_raises(self, hec_session):
+        """A 200 without ackId means acknowledgement is off on the HEC token."""
+        options = {"url": "http://localhost:8088/services/collector/event", "token": "t", "use_ack": "true"}
+        with pytest.raises(RuntimeError, match="no ackId"):
+            SplunkHecBatchWriter(options).write(iter([Row(id=1)]))
+
+    def test_no_channel_header_without_ack(self, hec_session, basic_options):
+        """The channel header is only sent when use_ack is on."""
+        SplunkHecBatchWriter(basic_options).write(iter([Row(id=1)]))
+        headers = hec_session.get_http_session.call_args[1]["additional_headers"]
+        assert "X-Splunk-Request-Channel" not in headers
+
+
 class TestSplunkHecStreamWriter:
     """Test SplunkHecStreamWriter functionality."""
 
