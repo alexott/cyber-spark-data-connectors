@@ -682,3 +682,71 @@ class TestRestApiCustomHeaders:
         call_args = mock_get_session.call_args
         headers = call_args[1]["additional_headers"]
         assert headers["Authorization"] == "Bearer token"
+
+
+@pytest.fixture
+def rest_session():
+    """Patch TaskContext and HTTP session; yields the mocked session (all methods return 200)."""
+    with (
+        patch("pyspark.TaskContext") as mock_task_context,
+        patch("cyber_connectors.RestApi.get_http_session") as mock_get_session,
+    ):
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+        mock_session = Mock()
+        ok = Mock()
+        ok.status_code = 200
+        ok.text = '{"status": "ok"}'
+        mock_session.post.return_value = ok
+        mock_session.put.return_value = ok
+        mock_session.get.return_value = ok
+        mock_get_session.return_value = mock_session
+        yield mock_session
+
+
+class TestRestApiWriterErrorsAndNesting:
+    """Error responses and nested columns in the REST API writer."""
+
+    @pytest.mark.parametrize("status_code", [400, 401, 404, 500])
+    def test_write_raises_on_error_status(self, rest_session, basic_options, status_code):
+        """A non-2xx response fails the write instead of losing the row silently."""
+        error = Mock()
+        error.status_code = status_code
+        error.text = '{"error": "bad request"}'
+        rest_session.post.return_value = error
+        with pytest.raises(RuntimeError, match=f"REST API returned {status_code}.*bad request"):
+            RestApiBatchWriter(basic_options).write(iter([Row(id=1)]))
+
+    def test_write_raises_on_error_status_get(self, rest_session):
+        """GET requests also fail on an error response."""
+        error = Mock()
+        error.status_code = 404
+        error.text = "not found"
+        rest_session.get.return_value = error
+        options = {"url": "http://localhost:8001", "http_method": "get", "url_query_params": "*"}
+        with pytest.raises(RuntimeError, match="REST API returned 404"):
+            RestApiBatchWriter(options).write(iter([Row(id=1)]))
+
+    def test_write_json_nested_struct_is_object(self, rest_session, basic_options):
+        """Nested rows are sent as JSON objects, not as arrays."""
+        rows = [Row(id=1, device=Row(hostname="h1", ip="10.0.0.1"), tags=[Row(k="a")])]
+        RestApiBatchWriter(basic_options).write(iter(rows))
+        payload = json.loads(rest_session.post.call_args[1]["data"])
+        assert payload["device"] == {"hostname": "h1", "ip": "10.0.0.1"}
+        assert payload["tags"] == [{"k": "a"}]
+
+    def test_write_form_data_nested_values_are_json(self, rest_session):
+        """Nested values in form data are JSON strings; scalars keep the str() format."""
+        options = {"url": "http://localhost:8001", "http_format": "form-data"}
+        rows = [Row(id=1, device=Row(hostname="h1"), tags=["a", "b"], name=None)]
+        RestApiBatchWriter(options).write(iter(rows))
+        data = rest_session.post.call_args[1]["data"]
+        assert data == {"id": "1", "device": '{"hostname": "h1"}', "tags": '["a", "b"]', "name": ""}
+
+    def test_write_query_params_nested_values_are_json(self, rest_session):
+        """Nested values in URL query parameters are JSON strings."""
+        options = {"url": "http://localhost:8001", "url_query_params": "device"}
+        rows = [Row(id=1, device=Row(hostname="h1"))]
+        RestApiBatchWriter(options).write(iter(rows))
+        assert rest_session.post.call_args[1]["params"] == {"device": '{"hostname": "h1"}'}

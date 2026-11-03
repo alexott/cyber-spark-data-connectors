@@ -293,6 +293,28 @@ class TestAzureMonitorWriter:
             assert mock_logs_client.upload.call_count == 3
 
     @patch("pyspark.TaskContext")
+    def test_write_nested_struct_is_object(self, mock_task_context, basic_options):
+        """Nested rows are sent as JSON objects (with field names), not as arrays."""
+        mock_context = Mock()
+        mock_context.partitionId.return_value = 0
+        mock_task_context.get.return_value = mock_context
+
+        with patch("azure.identity.ClientSecretCredential"), patch(
+            "azure.monitor.ingestion.LogsIngestionClient"
+        ) as mock_logs_client_class:
+            mock_logs_client = Mock()
+            mock_logs_client_class.return_value = mock_logs_client
+
+            writer = AzureMonitorBatchWriter(basic_options)
+            ts = datetime(2024, 1, 1, 12, 0, 0)
+            rows = [Row(id=1, device=Row(hostname="h1", seen=ts), tags=[Row(k="a")])]
+            writer.write(iter(rows))
+
+            log = mock_logs_client.upload.call_args[1]["logs"][0]
+            assert log["device"] == {"hostname": "h1", "seen": ts.isoformat()}
+            assert log["tags"] == [{"k": "a"}]
+
+    @patch("pyspark.TaskContext")
     def test_write_credential_creation(self, mock_task_context, basic_options):
         """Test that credentials are created correctly."""
         mock_context = Mock()
