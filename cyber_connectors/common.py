@@ -3,7 +3,7 @@
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any
 
 from pyspark.sql.datasource import WriterCommitMessage
@@ -20,12 +20,24 @@ class SimpleCommitMessage(WriterCommitMessage):
     count: int
 
 
+def to_utc_iso(value: datetime) -> str:
+    """Convert a datetime to an ISO 8601 string in UTC (with the +00:00 offset).
+
+    Spark passes TIMESTAMP values to Python as naive datetimes in the local time zone of the Python process,
+    so a naive datetime is taken as local time.  Without the conversion, a non-UTC machine sends shifted times.
+    TIMESTAMP_NTZ values are also naive and are treated the same way.
+    """
+    return value.astimezone(timezone.utc).isoformat()
+
+
 class DateTimeJsonEncoder(json.JSONEncoder):
-    """JSON encoder that serializes date and datetime values using ISO 8601."""
+    """JSON encoder that serializes datetimes as ISO 8601 in UTC, and dates as ISO 8601."""
 
     def default(self, o: Any) -> Any:
         """Convert dates and datetimes to ISO strings before JSON encoding."""
-        if isinstance(o, (datetime, date)):
+        if isinstance(o, datetime):
+            return to_utc_iso(o)
+        if isinstance(o, date):
             return o.isoformat()
 
         return super().default(o)

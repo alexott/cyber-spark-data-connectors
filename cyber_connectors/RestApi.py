@@ -9,7 +9,7 @@ from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourc
 from pyspark.sql.types import Row, StructType
 from requests import Response
 
-from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session, to_utc_iso
 
 
 class RestApiDataSource(DataSource):
@@ -85,7 +85,9 @@ class RestApiWriter:
         """Convert values to strings suitable for URL query parameters."""
         if value is None:
             return ""
-        if isinstance(value, (datetime, date)):
+        if isinstance(value, datetime):
+            return to_utc_iso(value)
+        if isinstance(value, date):
             return value.isoformat()
         if isinstance(value, (dict, list)):
             return json.dumps(value, cls=DateTimeJsonEncoder)
@@ -96,6 +98,8 @@ class RestApiWriter:
         """Convert values to strings for form data; nested values (structs, arrays, maps) become JSON."""
         if value is None:
             return ""
+        if isinstance(value, datetime):
+            return to_utc_iso(value)
         if isinstance(value, (dict, list)):
             return json.dumps(value, cls=DateTimeJsonEncoder)
         return str(value)

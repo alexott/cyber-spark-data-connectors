@@ -1,7 +1,7 @@
 """Unit tests for REST API data source."""
 
 import json
-from datetime import datetime
+from datetime import date, datetime
 from unittest.mock import Mock, patch
 
 import pytest
@@ -269,7 +269,7 @@ class TestRestApiWriter:
 
         assert commit_msg.count == 1
         call_args = mock_session.post.call_args[1]
-        assert call_args["params"] == {"id": "1", "timestamp": "2024-01-01T12:00:00"}
+        assert call_args["params"] == {"id": "1", "timestamp": "2024-01-01T12:00:00+00:00"}
         payload = json.loads(call_args["data"])
         assert payload == {"name": "test"}
 
@@ -750,3 +750,24 @@ class TestRestApiWriterErrorsAndNesting:
         rows = [Row(id=1, device=Row(hostname="h1"))]
         RestApiBatchWriter(options).write(iter(rows))
         assert rest_session.post.call_args[1]["params"] == {"device": '{"hostname": "h1"}'}
+
+
+class TestRestApiWriterTimeZone:
+    """Naive datetimes (Spark TIMESTAMP values) are local time and must be sent as UTC."""
+
+    def test_json_payload_is_utc(self, rest_session, basic_options, non_utc_local_time):
+        """2026-11-03 11:00 in Europe/Berlin is 10:00 UTC."""
+        RestApiBatchWriter(basic_options).write(iter([Row(ts=datetime(2026, 11, 3, 11, 0, 0))]))
+        assert json.loads(rest_session.post.call_args[1]["data"]) == {"ts": "2026-11-03T10:00:00+00:00"}
+
+    def test_query_params_are_utc(self, rest_session, non_utc_local_time):
+        """Datetimes in URL query parameters are UTC."""
+        options = {"url": "http://localhost:8001", "url_query_params": "ts"}
+        RestApiBatchWriter(options).write(iter([Row(ts=datetime(2026, 11, 3, 11, 0, 0))]))
+        assert rest_session.post.call_args[1]["params"] == {"ts": "2026-11-03T10:00:00+00:00"}
+
+    def test_form_data_is_utc(self, rest_session, non_utc_local_time):
+        """Datetimes in form data are UTC ISO strings; dates stay as they are."""
+        options = {"url": "http://localhost:8001", "http_format": "form-data"}
+        RestApiBatchWriter(options).write(iter([Row(ts=datetime(2026, 11, 3, 11, 0, 0), d=date(2026, 11, 3))]))
+        assert rest_session.post.call_args[1]["data"] == {"ts": "2026-11-03T10:00:00+00:00", "d": "2026-11-03"}

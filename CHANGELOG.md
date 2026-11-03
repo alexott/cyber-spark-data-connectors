@@ -7,6 +7,17 @@ All notable changes to this project are documented in this file.  The format fol
 
 ## [0.0.9] - Unreleased
 
+### All writers
+
+- **Timestamps are sent in UTC**: Spark passes `TIMESTAMP` values to Python as naive datetimes in the local time
+  zone of the Python process.  The writers sent them as ISO strings without an offset, so on a machine whose
+  time zone is not UTC every timestamp was shifted by the UTC offset (for example, `TimeGenerated` in Log Analytics
+  arrived 1 hour in the future from a CET machine, and time-ranged queries did not show the rows).  Datetimes in
+  Microsoft Sentinel / Azure Monitor payloads, Splunk event bodies and REST API payloads, query parameters and form
+  data are now converted to UTC and sent with the `+00:00` offset.  Clusters that run in UTC (the Databricks
+  default) were not affected, except for the new offset in the strings.  The Splunk HEC `time` value was already
+  correct.  `TIMESTAMP_NTZ` values are also naive, so they are treated as local time too.
+
 ### Splunk
 
 - **Errors fail the HEC write**: a non-2xx response from HEC (for example, an invalid token, a wrong index or a
