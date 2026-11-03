@@ -313,6 +313,15 @@ class TestSplunkHecWriterHardening:
         SplunkHecBatchWriter(options).write(iter([Row(_time=ts, user="alice")]))
         assert "_time" in _sent_events(hec_session)[0]["event"]
 
+    def test_naive_datetime_in_non_utc_zone(self, hec_session, non_utc_local_time):
+        """Naive datetimes are local time: HEC time and event body fields are the same UTC instant."""
+        options = {"url": "http://localhost:8088", "token": "t", "time_column": "_time"}
+        local = datetime(2026, 11, 3, 11, 0, 0)  # Europe/Berlin = 10:00 UTC
+        SplunkHecBatchWriter(options).write(iter([Row(_time=local, seen=local)]))
+        payload = _sent_events(hec_session)[0]
+        assert payload["time"] == datetime(2026, 11, 3, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        assert payload["event"]["seen"] == "2026-11-03T10:00:00+00:00"
+
     def test_host_and_source_columns(self, hec_session):
         """Per-row host/source come from columns; null falls back to the static option."""
         options = {

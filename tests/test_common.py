@@ -1,8 +1,9 @@
 """Unit tests for common utilities."""
 
-from datetime import date, datetime
+import json
+from datetime import date, datetime, timedelta, timezone
 
-from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session, to_utc_iso
 
 
 class TestSimpleCommitMessage:
@@ -145,3 +146,31 @@ class TestGetHttpSession:
         assert session is not None
         for key, value in headers.items():
             assert session.headers.get(key) == value
+
+
+class TestUtcConversion:
+    """Naive datetimes are local time (as Spark passes TIMESTAMP values) and are encoded in UTC."""
+
+    def test_naive_datetime_in_utc_zone(self):
+        """With a UTC local time zone only the offset is added."""
+        assert to_utc_iso(datetime(2026, 11, 3, 10, 0, 0)) == "2026-11-03T10:00:00+00:00"
+
+    def test_naive_datetime_in_non_utc_zone(self, non_utc_local_time):
+        """2026-11-03 11:00 in Europe/Berlin (UTC+1) is 10:00 UTC."""
+        assert to_utc_iso(datetime(2026, 11, 3, 11, 0, 0)) == "2026-11-03T10:00:00+00:00"
+
+    def test_naive_datetime_in_summer_time(self, non_utc_local_time):
+        """Summer time (UTC+2) is handled by the local time zone rules."""
+        assert to_utc_iso(datetime(2026, 7, 1, 12, 0, 0)) == "2026-07-01T10:00:00+00:00"
+
+    def test_aware_datetime_keeps_instant(self, non_utc_local_time):
+        """Aware datetimes are converted to UTC without a shift of the instant."""
+        dt = datetime(2026, 11, 3, 15, 30, 0, tzinfo=timezone(timedelta(hours=5, minutes=30)))
+        assert to_utc_iso(dt) == "2026-11-03T10:00:00+00:00"
+
+    def test_encoder_uses_utc(self, non_utc_local_time):
+        """DateTimeJsonEncoder converts datetimes to UTC and keeps dates as they are."""
+        result = json.loads(
+            json.dumps({"ts": datetime(2026, 11, 3, 11, 0, 0), "d": date(2026, 11, 3)}, cls=DateTimeJsonEncoder)
+        )
+        assert result == {"ts": "2026-11-03T10:00:00+00:00", "d": "2026-11-03"}

@@ -1,5 +1,6 @@
 """REST API data source implementation."""
 
+import json
 from collections.abc import Iterator
 from datetime import date, datetime
 from typing import Any, cast
@@ -8,7 +9,7 @@ from pyspark.sql.datasource import DataSource, DataSourceStreamWriter, DataSourc
 from pyspark.sql.types import Row, StructType
 from requests import Response
 
-from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session
+from cyber_connectors.common import DateTimeJsonEncoder, SimpleCommitMessage, get_http_session, to_utc_iso
 
 
 class RestApiDataSource(DataSource):
@@ -84,8 +85,23 @@ class RestApiWriter:
         """Convert values to strings suitable for URL query parameters."""
         if value is None:
             return ""
-        if isinstance(value, (datetime, date)):
+        if isinstance(value, datetime):
+            return to_utc_iso(value)
+        if isinstance(value, date):
             return value.isoformat()
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, cls=DateTimeJsonEncoder)
+        return str(value)
+
+    @staticmethod
+    def _convert_form_value(value: Any) -> str:
+        """Convert values to strings for form data; nested values (structs, arrays, maps) become JSON."""
+        if value is None:
+            return ""
+        if isinstance(value, datetime):
+            return to_utc_iso(value)
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, cls=DateTimeJsonEncoder)
         return str(value)
 
     def _split_row_data(self, row_dict: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
@@ -132,7 +148,7 @@ class RestApiWriter:
         for row in iterator:
             cnt += 1
             data: str | dict[str, str] | None = None
-            row_dict = row.asDict()
+            row_dict = row.asDict(recursive=True)
             payload_dict, query_params = self._split_row_data(row_dict)
             if self.http_method == "get" and payload_dict:
                 raise ValueError("HTTP GET requires all row columns to be sent as URL query parameters")
@@ -141,7 +157,7 @@ class RestApiWriter:
                 data = json.dumps(payload_dict, cls=DateTimeJsonEncoder)
             elif self.payload_format == "form-data":
                 # Convert all values to strings for form data
-                data = {k: str(v) if v is not None else "" for k, v in payload_dict.items()}
+                data = {k: self._convert_form_value(v) for k, v in payload_dict.items()}
 
             if self.http_method == "get":
                 response: Response = s.get(self.url, params=query_params)
@@ -151,7 +167,8 @@ class RestApiWriter:
                 response = s.put(self.url, data=data, params=query_params)
             else:
                 raise ValueError(f"Unsupported http method: {self.http_method}")
-            print(response.status_code, response.text)
+            if response.status_code >= 300:
+                raise RuntimeError(f"REST API returned {response.status_code}: {response.text}")
 
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 

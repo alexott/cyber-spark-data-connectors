@@ -58,3 +58,24 @@ Feel free to add more utility scripts here for:
 - Development utilities
 
 Keep utility scripts separate from the automated test suite in the `tests/` directory.
+
+### `sentinel_nested_check.py`
+
+End-to-end check that nested columns (structs, arrays of structs) reach a Log Analytics `dynamic` column as JSON
+objects.  It writes test rows to the `Details` column of `SentinelTIAlerts_CL` through the `ms-sentinel` writer,
+then reads them back with KQL and checks that `Details.ip`, `Details.tags[0].k` and similar paths work.
+
+The DCE, DCR and workspace IDs come from the Terraform state (`--tf-dir`), or from `--dce`, `--dcr-id` and
+`--workspace-id`.  `write` authenticates with `DefaultAzureCredential` (set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`,
+`AZURE_CLIENT_SECRET` for a service principal with "Monitoring Metrics Publisher" on the DCR and DCE).  `check`
+uses the Azure CLI login.
+
+```bash
+# released version, for comparison (expected to FAIL: nested values arrive as arrays)
+uv run --isolated --no-project --with cyber-spark-data-connectors==0.0.8 --with pyspark==4.2.1 --with pyarrow \
+  python utils/sentinel_nested_check.py write --label v0.0.8 --tf-dir <terraform dir>
+# current checkout (expected to PASS)
+uv run python utils/sentinel_nested_check.py write --label dev --tf-dir <terraform dir>
+# a few minutes later
+uv run python utils/sentinel_nested_check.py check --tf-dir <terraform dir>
+```

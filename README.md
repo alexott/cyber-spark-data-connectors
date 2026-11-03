@@ -814,6 +814,8 @@ df.write.format("rest").mode("overwrite") \
   .save()
 ```
 
+Nested columns (structs, arrays of structs) are sent as JSON objects in JSON payloads, and as JSON strings in form data and URL query parameters.  If the API returns an error status (non-2xx), the write fails with the response text.
+
 ## Installation
 
 Just install the package from PyPI:
