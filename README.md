@@ -83,6 +83,15 @@ Supported write options:
 - `indexed_fields` (string, optional) - comma-separated list of string columns to be [indexed in the ingestion time](http://docs.splunk.com/Documentation/Splunk/9.3.1/Data/IFXandHEC).
 - `remove_indexed_fields` (boolean, optional, default: `false`) - if indexed fields should be removed from the `event` object.
 - `batch_size` (int. optional, default: 50) - the size of the buffer to collect payload before sending to Splunk.
+- `max_payload_bytes` (int, optional, default: 0 = no limit) - also send the buffer before the request body becomes larger than this number of bytes.  Use it to stay below the HEC `max_content_length` limit when events are large.
+- `remove_time_column` (boolean, optional, default: `false`) - remove the `time_column` from the `event` object (the value is still sent as HEC `time`).
+- `host_column` (string, optional) - column with the host value for each event.  If the value is null, `host` is used.
+- `source_column` (string, optional) - column with the source value for each event.  If the value is null, `source` is used.
+- `use_ack` (boolean, optional, default: `false`) - use [HEC indexer acknowledgement](https://docs.splunk.com/Documentation/Splunk/latest/Data/AboutHECIDXAck): send a channel ID with each request, and finish the write only after Splunk confirms that all requests are indexed.  The HEC token must have indexer acknowledgement enabled, and `url` must contain `/services/collector`.
+- `ack_timeout` (float, optional, default: 300) - seconds to wait for all acknowledgements before the write fails.
+- `ack_poll_interval` (float, optional, default: 2) - seconds between acknowledgement checks.
+
+Nested columns (structs, arrays of structs) are sent as JSON objects.  If Splunk returns an error status (for example, an invalid token or index), the write fails with the Splunk response text, so a streaming query does not move its checkpoint past data that was not sent.  Delivery is at-least-once: a retried task or micro-batch can send the same events again.
 
 #### Reading from Splunk
 

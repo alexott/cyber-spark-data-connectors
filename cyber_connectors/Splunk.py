@@ -165,6 +165,13 @@ def _convert_value_to_schema_type(value, spark_type):
         ) from e
 
 
+def _to_bool(value) -> bool:
+    """Convert a boolean option (bool or "true"/"false" string) to bool."""
+    if isinstance(value, str):
+        return value.lower() == "true"
+    return bool(value)
+
+
 @dataclass
 class SplunkTimeRangePartition(InputPartition):
     """Represents a time range partition for parallel Splunk export queries."""
@@ -220,6 +227,13 @@ class SplunkDataSource(DataSource):
     - single_event_column: (optional) column name to use as the full event payload (i.e., text column)
     - indexed_fields: (optional) comma separated list of fields to index
     - remove_indexed_fields: (optional) remove indexed fields from event payload (default: false)
+    - remove_time_column: (optional) remove time_column from event payload (default: false)
+    - host_column: (optional) column with per-event host (falls back to host when null)
+    - source_column: (optional) column with per-event source (falls back to source when null)
+    - max_payload_bytes: (optional) also flush when the request body would exceed this size (default: 0 = no limit)
+    - use_ack: (optional) wait for HEC indexer acknowledgement before finishing the write (default: false)
+    - ack_timeout: (optional) seconds to wait for all acknowledgements (default: 300)
+    - ack_poll_interval: (optional) seconds between acknowledgement polls (default: 2)
 
     Read options:
     - splunkd_url: Splunk management API URL (e.g., https://splunk.example.com:8089)
@@ -456,19 +470,54 @@ class SplunkHecWriter:
         if self.single_event_column and self.source_type == "_json":
             self.source_type = "text"
         self.indexed_fields = str(self.options.get("indexed_fields", "")).split(",")
-        self.omit_indexed_fields = self.options.get("remove_indexed_fields", False)
-        if isinstance(self.omit_indexed_fields, str):
-            self.omit_indexed_fields = self.omit_indexed_fields.lower() == "true"
+        self.omit_indexed_fields = _to_bool(self.options.get("remove_indexed_fields", False))
+        self.omit_time_column = _to_bool(self.options.get("remove_time_column", False))
+        self.host_col = self.options.get("host_column")
+        self.source_col = self.options.get("source_column")
+        self.max_payload_bytes = int(self.options.get("max_payload_bytes", "0"))
+        self.use_ack = _to_bool(self.options.get("use_ack", False))
+        self.ack_timeout = float(self.options.get("ack_timeout", "300"))
+        self.ack_poll_interval = float(self.options.get("ack_poll_interval", "2"))
+        self.ack_url = None
+        if self.use_ack:
+            pos = self.url.find("/services/collector")
+            if pos < 0:
+                raise ValueError("use_ack requires url with /services/collector path")
+            self.ack_url = self.url[:pos] + "/services/collector/ack"
 
-    def _send_to_splunk(self, s: Session, msgs: list):
+    def _send_to_splunk(self, s: Session, msgs: list, ack_ids: list):
         if len(msgs) > 0:
             response = s.post(self.url, data="\n".join(msgs))
-            print(response.status_code, response.text)
+            if response.status_code >= 300:
+                raise RuntimeError(f"Splunk HEC returned {response.status_code}: {response.text}")
+            if self.use_ack:
+                ack_id = json.loads(response.text).get("ackId")
+                if ack_id is None:
+                    raise RuntimeError(
+                        f"Splunk HEC returned no ackId (is indexer acknowledgement on?): {response.text}"
+                    )
+                ack_ids.append(ack_id)
+
+    def _wait_for_acks(self, s: Session, ack_ids: list):
+        pending = list(ack_ids)
+        deadline = time.monotonic() + self.ack_timeout
+        while pending:
+            response = s.post(self.ack_url, json={"acks": pending})
+            if response.status_code >= 300:
+                raise RuntimeError(f"Splunk HEC ack returned {response.status_code}: {response.text}")
+            acks = json.loads(response.text).get("acks", {})
+            pending = [a for a in pending if not acks.get(str(a), False)]
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Splunk HEC did not acknowledge {len(pending)} request(s) in {self.ack_timeout}s")
+            time.sleep(self.ack_poll_interval)
 
     def write(self, iterator: Iterator[Row]):
         """Writes the data, then returns the commit message of that partition."""
         # Library imports must be within the method.
         import datetime
+        import uuid
 
         from pyspark import TaskContext
 
@@ -477,18 +526,29 @@ class SplunkHecWriter:
             raise RuntimeError("TaskContext is not available")
         partition_id = context.partitionId()
         cnt = 0
-        s = get_http_session(additional_headers={"Authorization": f"Splunk {self.token}"}, retry_on_post=True)
+        headers = {"Authorization": f"Splunk {self.token}"}
+        if self.use_ack:
+            headers["X-Splunk-Request-Channel"] = str(uuid.uuid4())
+        s = get_http_session(additional_headers=headers, retry_on_post=True)
 
         msgs = []
+        msgs_bytes = 0
+        ack_ids = []
         for row in iterator:
             cnt += 1
-            rd = row.asDict()
+            rd = row.asDict(recursive=True)
             d = {"sourcetype": self.source_type}
             if self.index:
                 d["index"] = self.index
-            if self.source:
+            source = rd.get(self.source_col) if self.source_col else None
+            if source is not None:
+                d["source"] = str(source)
+            elif self.source:
                 d["source"] = self.source
-            if self.host:
+            host = rd.get(self.host_col) if self.host_col else None
+            if host is not None:
+                d["host"] = str(host)
+            elif self.host:
                 d["host"] = self.host
             if self.time_col and self.time_col in rd:
                 tm = rd.get(self.time_col, datetime.datetime.now())
@@ -500,6 +560,8 @@ class SplunkHecWriter:
                     d["time"] = datetime.datetime.now().timestamp()
             else:
                 d["time"] = datetime.datetime.now().timestamp()
+            if self.omit_time_column and self.time_col:
+                rd.pop(self.time_col, None)
             if self.single_event_column and self.single_event_column in rd:
                 d["event"] = rd.get(self.single_event_column)
             elif self.indexed_fields:
@@ -514,13 +576,23 @@ class SplunkHecWriter:
                     d["event"] = rd
             else:
                 d["event"] = rd
-            msgs.append(json.dumps(d, cls=DateTimeJsonEncoder))
+            msg = json.dumps(d, cls=DateTimeJsonEncoder)
+            msg_bytes = len(msg.encode("utf-8")) + 1  # +1 for the newline separator
+            if self.max_payload_bytes > 0 and msgs and msgs_bytes + msg_bytes > self.max_payload_bytes:
+                self._send_to_splunk(s, msgs, ack_ids)
+                msgs = []
+                msgs_bytes = 0
+            msgs.append(msg)
+            msgs_bytes += msg_bytes
 
             if len(msgs) >= self.batch_size:
-                self._send_to_splunk(s, msgs)
+                self._send_to_splunk(s, msgs, ack_ids)
                 msgs = []
+                msgs_bytes = 0
 
-        self._send_to_splunk(s, msgs)
+        self._send_to_splunk(s, msgs, ack_ids)
+        if self.use_ack:
+            self._wait_for_acks(s, ack_ids)
 
         return SimpleCommitMessage(partition_id=partition_id, count=cnt)
 
