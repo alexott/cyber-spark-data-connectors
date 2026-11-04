@@ -90,6 +90,7 @@ Supported write options:
 - `use_ack` (boolean, optional, default: `false`) - use [HEC indexer acknowledgement](https://docs.splunk.com/Documentation/Splunk/latest/Data/AboutHECIDXAck): send a channel ID with each request, and finish the write only after Splunk confirms that all requests are indexed.  The HEC token must have indexer acknowledgement enabled, and `url` must contain `/services/collector`.
 - `ack_timeout` (float, optional, default: 300) - seconds to wait for all acknowledgements before the write fails.
 - `ack_poll_interval` (float, optional, default: 2) - seconds between acknowledgement checks.
+- `verify_ssl` (string, optional, default: `true`) - TLS certificate verification of the HEC endpoint: `true`, `false` (for example, for a self-signed certificate in a test setup), or a path to a CA bundle file.
 
 Nested columns (structs, arrays of structs) are sent as JSON objects.  If Splunk returns an error status (for example, an invalid token or index), the write fails with the Splunk response text, so a streaming query does not move its checkpoint past data that was not sent.  Delivery is at-least-once: a retried task or micro-batch can send the same events again.
 

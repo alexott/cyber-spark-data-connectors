@@ -64,6 +64,20 @@ def _parse_time_range(timespan=None, start_time=None, end_time=None):
         raise Exception("Either 'timespan' or 'start_time' must be provided")
 
 
+def _parse_verify_ssl(verify_ssl) -> bool | str:
+    """Parse the verify_ssl option: true (default), false, or a path to a CA bundle."""
+    if isinstance(verify_ssl, str):
+        if verify_ssl.lower() == "false":
+            return False
+        elif verify_ssl.lower() == "true":
+            return True
+        else:
+            # Path to CA bundle
+            return verify_ssl
+    else:
+        return bool(verify_ssl)
+
+
 def _build_spl_query_from_options(options: Mapping[str, Any]) -> str:
     """Build SPL query from options.
 
@@ -391,17 +405,7 @@ class SplunkDataSource(DataSource):
         )
 
         # TLS verification
-        verify_ssl = self.options.get("verify_ssl", "true")
-        if isinstance(verify_ssl, str):
-            if verify_ssl.lower() == "false":
-                session.verify = False
-            elif verify_ssl.lower() == "true":
-                session.verify = True
-            else:
-                # Path to CA bundle
-                session.verify = verify_ssl
-        else:
-            session.verify = bool(verify_ssl)
+        session.verify = _parse_verify_ssl(self.options.get("verify_ssl", "true"))
 
         return session
 
@@ -478,6 +482,7 @@ class SplunkHecWriter:
         self.use_ack = _to_bool(self.options.get("use_ack", False))
         self.ack_timeout = float(self.options.get("ack_timeout", "300"))
         self.ack_poll_interval = float(self.options.get("ack_poll_interval", "2"))
+        self.verify_ssl = _parse_verify_ssl(self.options.get("verify_ssl", "true"))
         self.ack_url = None
         if self.use_ack:
             pos = self.url.find("/services/collector")
@@ -530,6 +535,7 @@ class SplunkHecWriter:
         if self.use_ack:
             headers["X-Splunk-Request-Channel"] = str(uuid.uuid4())
         s = get_http_session(additional_headers=headers, retry_on_post=True)
+        s.verify = self.verify_ssl
 
         msgs = []
         msgs_bytes = 0
@@ -663,16 +669,7 @@ class SplunkReader:
 
     def _parse_verify_ssl(self, verify_ssl):
         """Parse verify_ssl option."""
-        if isinstance(verify_ssl, str):
-            if verify_ssl.lower() == "false":
-                return False
-            elif verify_ssl.lower() == "true":
-                return True
-            else:
-                # Path to CA bundle
-                return verify_ssl
-        else:
-            return bool(verify_ssl)
+        return _parse_verify_ssl(verify_ssl)
 
     def _create_session(self):
         """Create HTTP session with auth headers."""

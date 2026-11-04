@@ -297,6 +297,17 @@ class TestSplunkHecWriterHardening:
         event = _sent_events(hec_session)[0]["event"]
         assert event["device"] == {"hostname": "h1", "ip": "10.0.0.1"}
 
+    @pytest.mark.parametrize(
+        ("value", "expected"), [(None, True), ("false", False), ("True", True), ("/certs/ca.pem", "/certs/ca.pem")]
+    )
+    def test_verify_ssl(self, hec_session, value, expected):
+        """verify_ssl sets TLS verification of the HEC session: true by default, false, or a CA bundle path."""
+        options = {"url": "https://localhost:8088", "token": "t"}
+        if value is not None:
+            options["verify_ssl"] = value
+        SplunkHecBatchWriter(options).write(iter([Row(id=1)]))
+        assert hec_session.verify == expected
+
     def test_remove_time_column(self, hec_session):
         """remove_time_column drops the time column from the event body but keeps HEC time."""
         options = {"url": "http://localhost:8088", "token": "t", "time_column": "_time", "remove_time_column": "true"}
