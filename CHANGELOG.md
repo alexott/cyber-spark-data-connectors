@@ -5,6 +5,14 @@ All notable changes to this project are documented in this file.  The format fol
 [PyPI](https://pypi.org/project/cyber-spark-data-connectors/) and
 [GitHub](https://github.com/alexott/cyber-spark-data-connectors/releases).
 
+## [Unreleased]
+
+### Splunk
+
+- New HEC write option `verify_ssl`: `true` (default), `false`, or a path to a CA bundle.  Before, the HEC
+  writer always verified the certificate, so it could not send to a HEC endpoint with a self-signed
+  certificate.  The Splunk reader already had this option.
+
 ## [0.0.9] - 2026-11-03
 
 ### All writers
