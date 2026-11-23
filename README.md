@@ -15,6 +15,10 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
       - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
         - [Batch Read](#batch-read-1)
         - [Streaming Read](#streaming-read-1)
+    - [Databricks Lakewatch alerts](#databricks-lakewatch-alerts)
+      - [Authentication](#authentication)
+      - [Batch Read](#batch-read-2)
+      - [Streaming Read](#streaming-read-2)
     - [Simple REST API](#simple-rest-api)
   - [Installation](#installation)
   - [Building](#building)
@@ -711,6 +715,104 @@ stream_options = {
 - **Performance**: For very large tables without time-based indexes, the `min(timestamp_column)` query may be slow. This is a one-time cost during stream initialization.
 - **Aggregated queries**: If the query contains aggregations (e.g., `| summarize`), "earliest" will find the minimum timestamp from the aggregated results, not from raw data.
 - **Empty tables**: If the table has no data, falls back to current timestamp.
+
+### Databricks Lakewatch alerts
+
+This data source reads alerts from [Databricks Lakewatch](https://www.databricks.com/product/lakewatch) using the Lakewatch v2 REST API (`/api/2.0/lakewatch/alerts`), in batch and streaming modes.  It is read-only.  Registered data source name is `lakewatch-alerts`.
+
+Alerts are only available through the API (they aren't stored in a table), so this data source can be used to land them into a Delta table, or to forward them to other systems.  Streaming reads return **new** alerts only (by `create_time`) - later changes to an alert (state, assignee, classification) aren't picked up.
+
+#### Authentication
+
+> [!IMPORTANT]
+> Authentication must be provided explicitly when running inside Databricks (notebooks, jobs, serverless).  The default Databricks authentication **doesn't work** there: Spark runs the data source code in separate Python worker processes that don't have the notebook's credentials, so the read fails with `default auth: cannot configure default credentials`.
+
+Set `databricks_host` plus one of:
+
+- `databricks_token` - a personal access token or an OAuth access token.
+- `client_id` and `client_secret` - a service principal (OAuth M2M).  Recommended for jobs and long-running streams: a new OAuth token is obtained for every batch / micro-batch.
+
+The credentials are resolved on the driver with the [Databricks SDK](https://docs.databricks.com/aws/en/dev-tools/sdk-python), and the resulting host and auth headers are passed to the executors inside each partition, so executors don't need the SDK or their own credentials.  Outside Databricks (for example, local Spark), the options can be omitted, and the SDK's default resolution is used (environment variables like `DATABRICKS_HOST`/`DATABRICKS_TOKEN` or `DATABRICKS_CONFIG_PROFILE`, `~/.databrickscfg`).
+
+Using the notebook's own credentials.  `WorkspaceClient()` works in the notebook process itself, so it can be used to get the host and a token and pass them as options.  The token is short-lived, so use this for interactive work and short batch reads, not for long-running streams:
+
+```python
+from databricks.sdk import WorkspaceClient
+
+w = WorkspaceClient()  # runs in the notebook process, where the notebook's credentials are available
+auth_options = {
+    "databricks_host": w.config.host,
+    "databricks_token": w.config.authenticate()["Authorization"].removeprefix("Bearer "),
+}
+```
+
+Using a service principal stored in a secret scope:
+
+```python
+auth_options = {
+    "databricks_host": "https://<workspace-host>",
+    "client_id": dbutils.secrets.get("<scope>", "client-id"),
+    "client_secret": dbutils.secrets.get("<scope>", "client-secret"),
+}
+```
+
+The `auth_options` dictionary is used in the examples below.
+
+#### Batch Read
+
+```python
+from cyber_connectors import LakewatchAlertsDataSource
+spark.dataSource.register(LakewatchAlertsDataSource)
+
+# All alerts in the Lakewatch environment
+df = spark.read.format("lakewatch-alerts") \
+  .options(**auth_options) \
+  .option("catalog_name", "lakewatch_catalog") \
+  .load()
+
+# Security alerts created during one week, one partition per day
+df = spark.read.format("lakewatch-alerts") \
+  .options(**auth_options) \
+  .option("catalog_name", "lakewatch_catalog") \
+  .option("alert_type", "security") \
+  .option("start_time", "2026-11-01T00:00:00Z") \
+  .option("end_time", "2026-11-08T00:00:00Z") \
+  .load()
+```
+
+#### Streaming Read
+
+```python
+stream = spark.readStream.format("lakewatch-alerts") \
+  .options(**auth_options) \
+  .option("catalog_name", "lakewatch_catalog") \
+  .option("start_time", "earliest") \
+  .load()
+
+stream.writeStream.format("delta") \
+  .option("checkpointLocation", "/Volumes/catalog/schema/volume/checkpoints/lakewatch-alerts") \
+  .toTable("catalog.schema.lakewatch_alerts")
+```
+
+Supported options:
+
+- `catalog_name` (string, required) - Unity Catalog catalog of the Lakewatch environment.
+- `alert_type` (string, optional, default: `all`) - `all`, `security` (alerts from detection rules), or `system` (alerts from datasource or pipeline errors).
+- `partition_duration` (int, optional, default: 86400) - time range of `create_time` (in seconds) read by one partition.
+- `databricks_host` (string, required inside Databricks) - workspace URL.  Outside Databricks, it can come from the SDK's default resolution.
+- `databricks_token` (string) - personal access token or OAuth access token.  See [Authentication](#authentication).
+- `client_id` and `client_secret` (string) - service principal credentials (OAuth M2M).  See [Authentication](#authentication).
+- Batch only:
+  - `start_time` (string, optional) - ISO 8601 timestamp; only alerts created at or after it are read.  Without it, all alerts are read in one partition.
+  - `end_time` (string, optional, default: current time) - ISO 8601 timestamp; only alerts created before it are read.
+- Streaming only:
+  - `start_time` (string, optional, default: `latest`) - where to start: `latest` (from the current time), `earliest` (from the oldest alert matching `alert_type`), or an ISO 8601 timestamp.
+  - `safety_lag_seconds` (int, optional, default: 60) - how far each micro-batch stays behind the current time, so alerts that are being created aren't missed.
+
+The schema is predefined: `name` (unique key), `alert_id`, `seq_id` (display id like `sec-42`, not unique across workspaces), `catalog_id`, `alert_type`, `alert_state`, `classification`, `severity`, `title`, `description`, `origin` (struct: `type`, `resource_name`, `display_name`), `assignee` (struct: `id`, `principal_type`, `email`, `display_name`), `first_event_summary`, `total_event_count`, `first_event_time`, `last_event_time`, `create_time`, `update_time`, and `annotations` (map).
+
+> [!NOTE]
+> The Lakewatch v2 API isn't publicly documented yet and may change.
 
 ### Simple REST API
 
