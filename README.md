@@ -15,6 +15,7 @@ Based on [PySpark DataSource API](https://spark.apache.org/docs/preview/api/pyth
       - [Reading from Microsoft Sentinel / Azure Monitor](#reading-from-microsoft-sentinel--azure-monitor)
         - [Batch Read](#batch-read-1)
         - [Streaming Read](#streaming-read-1)
+    - [Google SecOps SOAR](#google-secops-soar)
     - [Simple REST API](#simple-rest-api)
   - [Installation](#installation)
   - [Building](#building)
@@ -711,6 +712,46 @@ stream_options = {
 - **Performance**: For very large tables without time-based indexes, the `min(timestamp_column)` query may be slow. This is a one-time cost during stream initialization.
 - **Aggregated queries**: If the query contains aggregations (e.g., `| summarize`), "earliest" will find the minimum timestamp from the aggregated results, not from raw data.
 - **Empty tables**: If the table has no data, falls back to current timestamp.
+
+### Google SecOps SOAR
+
+Pushes alerts (signals, detections) into [Google Security Operations SOAR](https://cloud.google.com/security/products/security-operations) through an [incoming webhook](https://docs.cloud.google.com/chronicle/docs/soar/ingest/webhooks/setting-up-a-webhook) - both batch & streaming.  SOAR groups the alerts into cases.  Registered data source name is `google-secops-soar`.
+
+To set it up, create an incoming webhook in Google SecOps (**Settings > Data Management > SOAR Webhooks**), and copy the webhook URL (it's shown only once).  Then upload a sample payload and map its fields in the webhook's **Data mapping** page, and enable the webhook.
+
+Each row is sent as one alert, with row columns used as alert fields.  These fields are mandatory: `TicketId`, `SourceSystemName`, `Name`, `DeviceVendor`, `RuleGenerator` and `StartTime` (timestamp, epoch milliseconds, or ISO 8601 string).  Optional fields include `EndTime`, `Priority` (0-100), `Description`, `Environment`, `DisplayId` and `EventsList` (array of structs with the raw events of the alert).  Rows with missing mandatory fields fail the write before they are sent.
+
+```python
+from cyber_connectors import *
+import pyspark.sql.functions as F
+
+spark.dataSource.register(GoogleSecOpsSoarDataSource)
+
+alerts = spark.table("security.gold.detections").select(
+  F.col("detection_id").alias("TicketId"),
+  F.col("rule_title").alias("Name"),
+  F.col("rule_id").alias("RuleGenerator"),
+  F.col("detection_time").alias("StartTime"),
+  F.col("severity_score").alias("Priority"),
+  F.array(F.struct("src_ip", "user_name", "host")).alias("EventsList"),
+)
+
+alerts.write.format("google-secops-soar").mode("overwrite") \
+  .option("url", dbutils.secrets.get("secops", "soar_webhook_url")) \
+  .option("source_system_name", "Databricks") \
+  .option("device_vendor", "Databricks") \
+  .save()
+```
+
+Supported options:
+
+- `url` (string, required) - URL of the SOAR incoming webhook.  The URL contains the secret, so keep it in a secret scope.
+- `source_system_name` (string, optional) - value for `SourceSystemName` when it's missing (or null) in the row.
+- `device_vendor` (string, optional) - value for `DeviceVendor` when it's missing (or null) in the row.
+- `environment` (string, optional) - value for `Environment` when it's missing (or null) in the row.
+- `display_id_columns` (string, optional, default: `*`) - comma-separated list of columns used to generate `DisplayId` when it's missing (or null) in the row.  Use `*` to use all columns.
+
+SOAR rejects alerts with a duplicate `DisplayId`.  If the row doesn't have `DisplayId`, the connector generates it as a SHA-256 hash of the columns listed in `display_id_columns` (all columns by default, after the defaults from options are filled in).  The same alert always gets the same `DisplayId`, so alerts sent again by retries (failed requests with HTTP 429/5xx are retried) or by re-processed streaming micro-batches are dropped by SOAR.  This also means that sending identical alerts again on purpose (for example, a backfill) is rejected.  If your data has columns that change on every run (like a processing timestamp), set `display_id_columns` to the columns that identify the alert, for example `TicketId,RuleGenerator,StartTime`, or set `DisplayId` yourself.  An HTTP 200 response only means that the webhook received the payload - check the SOAR platform logs if alerts don't show up.
 
 ### Simple REST API
 
